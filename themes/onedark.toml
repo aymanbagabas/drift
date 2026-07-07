@@ -1,0 +1,53 @@
+# difft onedark theme (the built-in default on dark terminals).
+#
+# Copy this to ~/.config/difft/config.toml and tweak to taste, or pass it
+# with --config. `[colors]` is the palette; `[styles]` maps named UI
+# components to a `fg bg attrs...` spec resolved against that palette. Any
+# color token also accepts a literal `#rrggbb`, a 0-255 index, or an ANSI
+# name (e.g. `blue`). Use `-` for "no color".
+
+theme = "onedark"        # syntax-highlighting theme (onedark/onelight or a syntect name)
+syntax = true            # highlight diff content
+intraline = true         # word-level change emphasis
+line_numbers = true      # old/new line-number gutter
+tab_width = 4
+
+[colors]
+add         = "#98c379"  # green
+remove      = "#e06c75"  # red
+context     = "#abb2bf"  # foreground
+header      = "#61afef"  # blue
+line_number = "#5c6370"  # grey
+primary     = "#c678dd"  # purple  (logo badge background)
+secondary   = "#61afef"  # blue    (help badge, dialog border)
+foreground  = "#abb2bf"
+background  = "#282c34"
+muted       = "#5c6370"
+surface     = "#3b4048"  # status bar / chip background
+cursor      = "#3e4451"  # current-line highlight
+add_line    = "#2b3a2e"  # whole-line wash for added lines
+remove_line = "#3f2d30"  # whole-line wash for removed lines
+add_emph    = "#3d5943"  # intra-line changed-word background (added)
+remove_emph = "#6d3b40"  # intra-line changed-word background (removed)
+
+# Component styles: `fg bg attrs...`. Attrs: bold, faint/dim, italic,
+# underline, strikethrough, blink, reverse, conceal.
+[styles]
+add                = "add"
+remove             = "remove"
+context            = "context"
+header             = "header bold"
+line_number        = "line_number"
+statusbar          = "foreground surface"
+statusbar_logo     = "background primary bold"
+statusbar_filename = "foreground surface bold"
+statusbar_add      = "add surface"
+statusbar_remove   = "remove surface"
+statusbar_flags    = "muted surface"
+statusbar_stats    = "foreground surface"
+statusbar_watch    = "background add bold"
+statusbar_help     = "background secondary bold"
+help_key           = "muted bold"
+help_desc          = "muted faint"
+dialog             = "foreground background"
+dialog_border      = "secondary background"
