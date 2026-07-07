@@ -500,7 +500,7 @@ impl App {
             ("s", "split view"),
             ("f", "files"),
             ("w", "watch on/off"),
-            ("enter", "expand / open"),
+            ("enter", "expand context"),
             ("e", "edit in $EDITOR"),
             ("y", "copy selection"),
             ("Y", "copy file diff"),
@@ -804,12 +804,10 @@ impl App {
                 } else if k.matches("e") {
                     self.open_editor()?;
                 } else if k.matches("enter") {
-                    // Enter expands folded context on a hunk header, otherwise
-                    // opens the file at the cursor line.
+                    // Enter expands folded context on a hunk header; it no
+                    // longer opens the editor (use `e` for that).
                     if self.on_hunk() && !matches!(self.source, Source::Stdin) {
                         self.expand_here();
-                    } else {
-                        self.open_editor()?;
                     }
                 } else if k.matches("r") {
                     self.reload();
