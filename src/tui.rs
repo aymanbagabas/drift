@@ -217,6 +217,10 @@ impl App {
     /// Spawn a worker that builds every file's rows (the selected file first so
     /// it shows soonest) and streams them back over a channel.
     fn spawn_prefetch(&mut self) {
+        if self.files.is_empty() {
+            self.prefetch = None;
+            return;
+        }
         let files = Arc::new(self.files.clone());
         let hl = Arc::clone(&self.highlighter);
         let intraline = self.config.intraline;
