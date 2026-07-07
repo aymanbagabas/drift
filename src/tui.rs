@@ -3,7 +3,8 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use uncurses::buffer::{Bounded, SurfaceMut};
@@ -129,13 +130,16 @@ pub struct App {
     screen: Screen<TtyInput, TtyOutput>,
     config: Config,
     theme: Theme,
-    highlighter: Highlighter,
+    highlighter: Arc<Highlighter>,
     source: Source,
     opts: crate::git::Opts,
     toplevel: Option<PathBuf>,
     files: Vec<FileDiff>,
     /// Precomputed display rows per file, built lazily and kept until reload.
     row_cache: Vec<Option<Vec<Row>>>,
+    /// Background row builder feeding `row_cache` after startup so the first
+    /// frame isn't blocked on syntax highlighting.
+    prefetch: Option<Receiver<(usize, Vec<Row>)>>,
     selected: usize,
     /// Top visible row (viewport offset).
     scroll: usize,
@@ -156,7 +160,7 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config, source: Source, opts: crate::git::Opts) -> io::Result<Self> {
-        let highlighter = Highlighter::new(&config.theme, config.syntax);
+        let highlighter = Arc::new(Highlighter::new(&config.theme, config.syntax));
         let theme = Theme::from_config(&config);
         // Read input/output from the controlling terminal (/dev/tty) so the
         // TUI works even when a diff is piped in on stdin (pager mode).
@@ -180,6 +184,7 @@ impl App {
             toplevel: crate::git::toplevel(),
             files: Vec::new(),
             row_cache: Vec::new(),
+            prefetch: None,
             selected: 0,
             scroll: 0,
             cursor: 0,
@@ -190,8 +195,75 @@ impl App {
             watch: false,
             expand: 0,
         };
-        app.reload();
+        app.start();
         Ok(app)
+    }
+
+    /// Initial load used at startup: run the diff, parse it, then hand row
+    /// building off to a background thread so the first frame paints without
+    /// blocking on syntax highlighting.
+    fn start(&mut self) {
+        match self.source.diff(&self.effective_opts()) {
+            Ok(text) => self.files = diff::parse(&text),
+            Err(_) => self.files.clear(),
+        }
+        self.selected = 0;
+        self.cursor = 0;
+        self.scroll = 0;
+        self.row_cache = (0..self.files.len()).map(|_| None).collect();
+        self.spawn_prefetch();
+    }
+
+    /// Spawn a worker that builds every file's rows (the selected file first so
+    /// it shows soonest) and streams them back over a channel.
+    fn spawn_prefetch(&mut self) {
+        let files = Arc::new(self.files.clone());
+        let hl = Arc::clone(&self.highlighter);
+        let intraline = self.config.intraline;
+        let sel = self.selected;
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let n = files.len();
+            let order = std::iter::once(sel).chain((0..n).filter(|&i| i != sel));
+            for idx in order {
+                let rows = build_file_rows(&files[idx], &hl, intraline);
+                if tx.send((idx, rows)).is_err() {
+                    return; // receiver dropped (reload/quit): stop early.
+                }
+            }
+        });
+        self.prefetch = Some(rx);
+    }
+
+    /// Move any rows the prefetch worker has finished into the cache. Returns
+    /// whether the selected file's rows just landed (so the caller can repaint).
+    fn drain_prefetch(&mut self) {
+        let Some(rx) = self.prefetch.take() else {
+            return;
+        };
+        let mut selected_ready = false;
+        loop {
+            match rx.try_recv() {
+                Ok((idx, rows)) => {
+                    if let Some(slot) = self.row_cache.get_mut(idx) {
+                        if slot.is_none() {
+                            *slot = Some(rows);
+                            if idx == self.selected {
+                                selected_ready = true;
+                            }
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    self.prefetch = Some(rx);
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => break, // worker done: drop rx.
+            }
+        }
+        if selected_ready {
+            self.move_cursor(0);
+        }
     }
 
     /// The base diff options plus any extra context from expanded folds.
@@ -207,6 +279,9 @@ impl App {
     /// where it was so refreshes and fold-expansions aren't jarring.
     fn reload(&mut self) {
         let (sel, cur) = (self.selected, self.cursor);
+        // Drop any in-flight startup prefetch so its (now stale) rows can't
+        // land in the freshly rebuilt cache.
+        self.prefetch = None;
         match self.source.diff(&self.effective_opts()) {
             Ok(text) => self.files = diff::parse(&text),
             Err(_) => self.files.clear(),
@@ -285,54 +360,10 @@ impl App {
 
     /// Flatten a file into styled display rows (syntax + intra-line spans).
     fn build_rows(&self, idx: usize) -> Vec<Row> {
-        let mut rows: Vec<Row> = Vec::new();
-        let Some(file) = self.files.get(idx) else {
-            return rows;
-        };
-
-        if file.is_binary {
-            rows.push(Row {
-                kind: RowKind::Note,
-                old_no: None,
-                new_no: None,
-                spans: vec![Span {
-                    fg: None,
-                    changed: false,
-                    text: "Binary file — no textual diff".into(),
-                }],
-            });
-            return rows;
+        match self.files.get(idx) {
+            Some(file) => build_file_rows(file, &self.highlighter, self.config.intraline),
+            None => Vec::new(),
         }
-
-        for hunk in &file.hunks {
-            rows.push(Row {
-                kind: RowKind::Hunk,
-                old_no: None,
-                new_no: None,
-                spans: vec![Span {
-                    fg: None,
-                    changed: false,
-                    text: hunk.header.clone(),
-                }],
-            });
-            let mut hl = self.highlighter.file(file.path());
-            for line in &hunk.lines {
-                let syntax_spans = hl.line(&line.content);
-                let spans = merge(syntax_spans, &line.segments, self.config.intraline);
-                let kind = match line.kind {
-                    LineKind::Add => RowKind::Add,
-                    LineKind::Remove => RowKind::Remove,
-                    LineKind::Context => RowKind::Context,
-                };
-                rows.push(Row {
-                    kind,
-                    old_no: line.old_no,
-                    new_no: line.new_no,
-                    spans,
-                });
-            }
-        }
-        rows
     }
 
     fn viewport_rows(&self) -> usize {
@@ -478,9 +509,17 @@ impl App {
     pub fn run(&mut self, refresh: Option<Receiver<()>>, watch: bool) -> io::Result<()> {
         self.watch = watch;
         loop {
+            // Fold in any rows the startup worker has finished.
+            self.drain_prefetch();
             self.render()?;
-            // Poll so we can also react to watch notifications.
-            if self.screen.poll_event(Some(Duration::from_millis(200)))? {
+            // Poll faster while the prefetch is still streaming so freshly
+            // parsed files appear promptly; idle at 200ms once it's done.
+            let timeout = if self.prefetch.is_some() {
+                Duration::from_millis(16)
+            } else {
+                Duration::from_millis(200)
+            };
+            if self.screen.poll_event(Some(timeout))? {
                 // Drain every queued event before the next render so bursts
                 // (held keys, fast scrolling, paste) stay responsive.
                 while let Some(ev) = self.screen.try_read_event() {
@@ -1107,6 +1146,55 @@ impl App {
 
 fn base_fg(style: &Style) -> Option<Color> {
     style.fg
+}
+
+/// Flatten a single file diff into styled display rows. Free-standing so it can
+/// run on the startup prefetch thread as well as the lazy main-thread path.
+fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::new();
+    if file.is_binary {
+        rows.push(Row {
+            kind: RowKind::Note,
+            old_no: None,
+            new_no: None,
+            spans: vec![Span {
+                fg: None,
+                changed: false,
+                text: "Binary file — no textual diff".into(),
+            }],
+        });
+        return rows;
+    }
+
+    for hunk in &file.hunks {
+        rows.push(Row {
+            kind: RowKind::Hunk,
+            old_no: None,
+            new_no: None,
+            spans: vec![Span {
+                fg: None,
+                changed: false,
+                text: hunk.header.clone(),
+            }],
+        });
+        let mut fh = hl.file(file.path());
+        for line in &hunk.lines {
+            let syntax_spans = fh.line(&line.content);
+            let spans = merge(syntax_spans, &line.segments, intraline);
+            let kind = match line.kind {
+                LineKind::Add => RowKind::Add,
+                LineKind::Remove => RowKind::Remove,
+                LineKind::Context => RowKind::Context,
+            };
+            rows.push(Row {
+                kind,
+                old_no: line.old_no,
+                new_no: line.new_no,
+                spans,
+            });
+        }
+    }
+    rows
 }
 
 /// Combine syntect color spans with intra-line changed segments into a single
