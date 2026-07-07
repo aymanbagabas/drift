@@ -98,6 +98,24 @@ fn strip_prefix(p: &str) -> String {
     p.to_string()
 }
 
+/// Split a raw unified diff into per-file sections, one string per `diff --git`
+/// block, in the same order (and count) as [`parse`]. Any preamble before the
+/// first block (e.g. `git show` commit headers) is dropped. Used to copy an
+/// exact per-file patch without reconstructing it.
+pub fn split_files(input: &str) -> Vec<String> {
+    let mut sections: Vec<String> = Vec::new();
+    for line in input.lines() {
+        if line.starts_with("diff --git") {
+            sections.push(String::new());
+        }
+        if let Some(cur) = sections.last_mut() {
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    sections
+}
+
 /// Parse a unified diff (as produced by `git diff` / `git show`) into files.
 pub fn parse(input: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
@@ -380,5 +398,22 @@ index 1234567..89abcde 100644\n\
         let files = parse(&d);
         assert_eq!(files.len(), 2);
         assert_eq!(files[1].path(), "b.txt");
+    }
+
+    #[test]
+    fn split_files_matches_parse_and_drops_preamble() {
+        // A `git show` preamble before the first `diff --git` is discarded, and
+        // the section count/order lines up 1:1 with parse().
+        let d = format!(
+            "commit abc\nAuthor: x\n\n    msg\n\n{SAMPLE}diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n"
+        );
+        let sections = split_files(&d);
+        let files = parse(&d);
+        assert_eq!(sections.len(), files.len());
+        assert!(sections[0].starts_with("diff --git a/src/main.rs"));
+        assert!(sections[1].starts_with("diff --git a/b.txt"));
+        assert!(sections[1].contains("+new"));
+        // No commit preamble leaked into the first section.
+        assert!(!sections[0].contains("commit abc"));
     }
 }

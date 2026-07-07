@@ -213,6 +213,9 @@ pub struct App {
     opts: crate::git::Opts,
     toplevel: Option<PathBuf>,
     files: Vec<FileDiff>,
+    /// The raw unified-diff text for each file, in the same order as `files`,
+    /// so `Y` can copy an exact per-file patch without reconstructing it.
+    raw_files: Vec<String>,
     /// Precomputed display rows per file, built lazily and kept until reload.
     row_cache: Vec<Option<Vec<Row>>>,
     /// Background row builder feeding `row_cache` after startup so the first
@@ -265,6 +268,7 @@ impl App {
             opts,
             toplevel: crate::git::toplevel(),
             files: Vec::new(),
+            raw_files: Vec::new(),
             row_cache: Vec::new(),
             prefetch: None,
             selected: 0,
@@ -288,8 +292,14 @@ impl App {
     /// blocking on syntax highlighting.
     fn start(&mut self) {
         match self.source.diff(&self.effective_opts()) {
-            Ok(text) => self.files = diff::parse(&text),
-            Err(_) => self.files.clear(),
+            Ok(text) => {
+                self.files = diff::parse(&text);
+                self.raw_files = diff::split_files(&text);
+            }
+            Err(_) => {
+                self.files.clear();
+                self.raw_files.clear();
+            }
         }
         self.selected = 0;
         self.cursor = 0;
@@ -371,8 +381,14 @@ impl App {
         // land in the freshly rebuilt cache.
         self.prefetch = None;
         match self.source.diff(&self.effective_opts()) {
-            Ok(text) => self.files = diff::parse(&text),
-            Err(_) => self.files.clear(),
+            Ok(text) => {
+                self.files = diff::parse(&text);
+                self.raw_files = diff::split_files(&text);
+            }
+            Err(_) => {
+                self.files.clear();
+                self.raw_files.clear();
+            }
         }
         self.selected = sel.min(self.files.len().saturating_sub(1));
         // Invalidate the per-file row cache; rows are rebuilt lazily on view.
@@ -483,6 +499,7 @@ impl App {
             ("enter", "expand / open"),
             ("e", "edit in $EDITOR"),
             ("y", "copy selection"),
+            ("Y", "copy file diff"),
             ("r", "refresh"),
             ("?", "toggle help"),
             ("q", "quit"),
@@ -727,6 +744,8 @@ impl App {
                         self.cursor_to(0);
                     } else if k.matches("r") {
                         self.reload();
+                    } else if k.matches("Y") {
+                        self.yank_file()?;
                     }
                     return Ok(false);
                 }
@@ -734,6 +753,9 @@ impl App {
                     return Ok(true);
                 } else if k.matches("y") {
                     self.yank()?;
+                    return Ok(false);
+                } else if k.matches("Y") {
+                    self.yank_file()?;
                     return Ok(false);
                 }
                 // Any other navigation key cancels an active selection and its
@@ -904,7 +926,19 @@ impl App {
         Ok(())
     }
 
-    /// Extract the selected region from the row content, in reading order.
+    /// Copy the selected file's raw unified diff (exactly as git produced it)
+    /// to the system clipboard.
+    fn yank_file(&mut self) -> io::Result<()> {
+        let Some(patch) = self.raw_files.get(self.selected) else {
+            return Ok(());
+        };
+        if patch.is_empty() {
+            return Ok(());
+        }
+        self.screen.set_system_clipboard(patch.as_bytes())?;
+        self.flash = Some("copied file diff".into());
+        Ok(())
+    }
     fn selection_text(&self, sel: Sel) -> String {
         let rows = self.rows();
         if rows.is_empty() {
