@@ -38,6 +38,8 @@ struct Theme {
     add_line_bg: Option<Color>,
     remove_line_bg: Option<Color>,
     cursor_bg: Color,
+    // Terminal default background (OSC 11); `None` rides the terminal's own.
+    background: Option<Color>,
     // Status bar components.
     statusbar: Style,
     statusbar_logo: Style,
@@ -74,6 +76,7 @@ impl Theme {
             add_line_bg: pal.color("add-line"),
             remove_line_bg: pal.color("remove-line"),
             cursor_bg: pal.color("cursor").unwrap_or(Color::Indexed(237)),
+            background: pal.color("background"),
             statusbar: sty("statusbar", "foreground surface"),
             statusbar_logo: sty("statusbar-logo", "background primary bold"),
             statusbar_filename: sty("statusbar-filename", "foreground surface bold"),
@@ -264,6 +267,12 @@ impl App {
         })?;
         screen.enter_alt_screen()?;
         screen.hide_cursor()?;
+        // Paint the whole terminal in the theme's background so unwritten gaps
+        // match the diff body. Skipped when the theme rides the terminal's own
+        // background (e.g. the `ansi` theme). uncurses resets this on finish().
+        if let Some(c) = theme.background {
+            screen.set_background_color(c)?;
+        }
         // Enable mouse now rather than waiting for the capability-query reply,
         // so clicks and wheel work immediately (and in non-interactive tests).
         screen.enable_mouse(MouseTracking::empty())?;
