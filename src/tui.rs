@@ -5,7 +5,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use uncurses::buffer::{Bounded, Line, SurfaceMut};
 use uncurses::cell::Cell;
@@ -18,6 +18,9 @@ use uncurses::text::{grapheme_cells, TextSurface, WidthMode};
 
 use crate::config::{parse_style, Config, Palette};
 use crate::diff::{self, FileDiff, LineKind};
+
+/// How long a transient footer note stays before it auto-expires.
+const FLASH: Duration = Duration::from_secs(2);
 use crate::git::Source;
 use crate::highlight::Highlighter;
 
@@ -239,8 +242,9 @@ pub struct App {
     expand: usize,
     /// Active mouse text selection, drawn reversed and yanked with `y`.
     sel: Option<Sel>,
-    /// Transient footer note (e.g. "copied 3 lines"), cleared on next keypress.
-    flash: Option<String>,
+    /// Transient footer note (e.g. "copied 3 lines") with the instant it was
+    /// set, so it auto-expires after `FLASH`.
+    flash: Option<(String, Instant)>,
 }
 
 impl App {
@@ -662,14 +666,23 @@ impl App {
         loop {
             // Fold in any rows the startup worker has finished.
             self.drain_prefetch();
+            // Expire a transient footer note after its lifetime.
+            if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() >= FLASH) {
+                self.flash = None;
+            }
             self.render()?;
             // Poll faster while the prefetch is still streaming so freshly
             // parsed files appear promptly; idle at 200ms once it's done.
-            let timeout = if self.prefetch.is_some() {
+            let mut timeout = if self.prefetch.is_some() {
                 Duration::from_millis(16)
             } else {
                 Duration::from_millis(200)
             };
+            // While a note is showing, wake around its expiry so it clears on
+            // time rather than on the next idle tick.
+            if let Some((_, t)) = &self.flash {
+                timeout = timeout.min(FLASH.saturating_sub(t.elapsed()).max(Duration::from_millis(1)));
+            }
             if self.screen.poll_event(Some(timeout))? {
                 // Drain every queued event before the next render so bursts
                 // (held keys, fast scrolling, paste) stay responsive.
@@ -703,7 +716,6 @@ impl App {
                 if k.matches("escape") {
                     if self.sel.is_some() {
                         self.sel = None;
-                        self.flash = None;
                     } else if self.view == View::Stat {
                         self.view = View::Diff;
                     }
@@ -758,10 +770,9 @@ impl App {
                     self.yank_file()?;
                     return Ok(false);
                 }
-                // Any other navigation key cancels an active selection and its
-                // "copied" note.
+                // Any other navigation key cancels an active selection; the
+                // "copied" note fades on its own timer.
                 self.sel = None;
-                self.flash = None;
                 if k.matches_any(["j", "down"]) {
                     self.move_cursor(1);
                 } else if k.matches_any(["k", "up"]) {
@@ -822,7 +833,6 @@ impl App {
                         self.set_cursor(self.scroll + row);
                         // Text selection is only offered in the unified view;
                         // split panes have no single reading order.
-                        self.flash = None;
                         if !self.split {
                             let (r, c) = self.point_to_content(m.x, m.y);
                             self.sel = Some(Sel {
@@ -918,12 +928,17 @@ impl App {
         }
         let lines = text.matches('\n').count() + 1;
         self.screen.set_system_clipboard(text.as_bytes())?;
-        self.flash = Some(format!(
+        self.set_flash(format!(
             "copied {} line{}",
             lines,
             if lines == 1 { "" } else { "s" }
         ));
         Ok(())
+    }
+
+    /// Set a transient footer note stamped with the current time.
+    fn set_flash(&mut self, msg: impl Into<String>) {
+        self.flash = Some((msg.into(), Instant::now()));
     }
 
     /// Copy the selected file's raw unified diff (exactly as git produced it)
@@ -936,7 +951,7 @@ impl App {
             return Ok(());
         }
         self.screen.set_system_clipboard(patch.as_bytes())?;
-        self.flash = Some("copied file diff".into());
+        self.set_flash("copied file diff");
         Ok(())
     }
     fn selection_text(&self, sel: Sel) -> String {
@@ -1120,16 +1135,16 @@ impl App {
             put(self, &mut x, " ", bar.clone());
         }
 
-        // A transient "copied N lines" note takes over the file-name area until
-        // the next keypress.
-        if let Some(msg) = self.flash.clone() {
-            let badge = format!(" {msg} ");
-            let badge = clip(&badge, stats_x.saturating_sub(app.chars().count() as u16));
-            self.screen.set_str(
-                (app.chars().count() as u16, row),
-                &badge,
-                self.theme.statusbar_add.clone(),
-            );
+        // A transient note (e.g. "copied 3 lines") sits right after the
+        // per-file stats and auto-expires; clip it to the space left before the
+        // right-aligned global stats.
+        if let Some((msg, _)) = self.flash.clone() {
+            if x < stats_x {
+                let badge = format!(" {msg} ");
+                let badge = clip(&badge, stats_x - x);
+                self.screen
+                    .set_str((x, row), &badge, self.theme.statusbar_add.clone());
+            }
         }
     }
 
