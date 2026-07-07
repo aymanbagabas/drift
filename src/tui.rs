@@ -677,12 +677,12 @@ impl App {
         }
     }
 
-    /// Set the terminal window title to "<filename> ● difft", updating only
+    /// Set the terminal window title to "<filename> ● diffv", updating only
     /// when it changes so we don't emit an OSC on every frame.
     fn update_title(&mut self) -> io::Result<()> {
         let want = match self.files.get(self.selected) {
-            Some(f) => format!("{} · difft", f.path()),
-            None => "difft".to_string(),
+            Some(f) => format!("{} · diffv", f.path()),
+            None => "diffv".to_string(),
         };
         if want != self.title {
             self.screen.set_title(&want)?;
@@ -725,7 +725,7 @@ impl App {
         self.screen.render()
     }
 
-    /// The single bottom footer: a bold "difft" badge, the current file name,
+    /// The single bottom footer: a bold "diffv" badge, the current file name,
     /// its stats and flags on a subtle chip, then right-aligned global stats, a
     /// watch indicator, and a "? help" badge.
     fn render_footer(&mut self, row: u16) {
@@ -767,8 +767,8 @@ impl App {
         self.screen
             .set_str((stats_x, row), &stats, self.theme.statusbar_stats.clone());
 
-        // Left: bold "difft" badge in the primary accent.
-        let app = " difft ";
+        // Left: bold "diffv" badge in the primary accent.
+        let app = " diffv ";
         self.screen
             .set_str((0, row), app, self.theme.statusbar_logo.clone());
         let mut x = app.chars().count() as u16;

@@ -1,4 +1,4 @@
-//! difft — a standalone git diff pager for the terminal.
+//! diffv — a standalone git diff pager for the terminal.
 
 mod config;
 mod diff;
@@ -18,7 +18,7 @@ use git::Source;
 /// A standalone git diff pager: browse commit, staged, or working-tree diffs
 /// in a TUI with syntax highlighting, intra-line changes, and live refresh.
 #[derive(Parser, Debug)]
-#[command(name = "difft", version, about)]
+#[command(name = "diffv", version, about)]
 struct Cli {
     /// Commit to show, or a revision range like `main..feature`.
     revision: Option<String>,
@@ -31,7 +31,7 @@ struct Cli {
     #[arg(short, long)]
     watch: bool,
 
-    /// Run as if difft was started in this directory (like `git -C`). Works
+    /// Run as if diffv was started in this directory (like `git -C`). Works
     /// with worktrees and bare repositories.
     #[arg(short = 'C', long = "directory", value_name = "DIR")]
     directory: Option<PathBuf>,
@@ -56,14 +56,14 @@ struct Cli {
     #[arg(long = "diff-algorithm", value_name = "ALGO")]
     diff_algorithm: Option<String>,
 
-    /// Limit the diff to these paths (after `--`), e.g. `difft -- src/ docs/`.
+    /// Limit the diff to these paths (after `--`), e.g. `diffv -- src/ docs/`.
     #[arg(last = true, value_name = "PATHSPEC")]
     pathspec: Vec<String>,
 }
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("difft: {e}");
+        eprintln!("diffv: {e}");
         std::process::exit(1);
     }
 }

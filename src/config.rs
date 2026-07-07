@@ -1,5 +1,5 @@
 //! Configuration: theme, colors, and settings loaded from a TOML/YAML/JSON
-//! file and overlaid with any `[difft]` values from git config.
+//! file and overlaid with any `[diffv]` values from git config.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ pub struct Colors {
     pub context: String,
     pub header: String,
     pub line_number: String,
-    /// Primary accent: the "difft" badge background in the footer.
+    /// Primary accent: the "diffv" badge background in the footer.
     pub primary: String,
     /// Secondary accent: file name text, the "? help" badge, and dialog
     /// backgrounds.
@@ -105,7 +105,7 @@ impl Default for Colors {
 
 impl Config {
     /// Load config: defaults, then a config file (explicit path or the first
-    /// found in standard locations), then git config `[difft]` overrides.
+    /// found in standard locations), then git config `[diffv]` overrides.
     pub fn load(explicit: Option<&Path>) -> Self {
         let mut cfg = Config::default();
         if let Some(path) = explicit.map(PathBuf::from).or_else(find_config_file) {
@@ -152,7 +152,7 @@ impl Config {
 
     fn apply_gitconfig(&mut self) {
         let Ok(out) = Command::new("git")
-            .args(["config", "--get-regexp", "^difft\\."])
+            .args(["config", "--get-regexp", "^diffv\\."])
             .output()
         else {
             return;
@@ -165,7 +165,7 @@ impl Config {
                 continue;
             };
             let val = val.trim();
-            match key.trim_start_matches("difft.").to_ascii_lowercase().as_str() {
+            match key.trim_start_matches("diffv.").to_ascii_lowercase().as_str() {
                 "theme" => self.theme = val.to_string(),
                 "syntax" => self.syntax = parse_bool(val, self.syntax),
                 "intraline" => self.intraline = parse_bool(val, self.intraline),
@@ -189,7 +189,7 @@ impl Config {
                 "coloraddline" => self.colors.add_line = val.to_string(),
                 "colorremoveline" => self.colors.remove_line = val.to_string(),
                 other => {
-                    // difft.style<name> overrides a component style spec.
+                    // diffv.style<name> overrides a component style spec.
                     if let Some(name) = other.strip_prefix("style") {
                         if !name.is_empty() {
                             self.styles.insert(name.to_string(), val.to_string());
@@ -214,10 +214,10 @@ impl Config {
 fn find_config_file() -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
-        dirs.push(PathBuf::from(x).join("difft"));
+        dirs.push(PathBuf::from(x).join("diffv"));
     }
     if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(&home).join(".config/difft"));
+        dirs.push(PathBuf::from(&home).join(".config/diffv"));
         dirs.push(PathBuf::from(home));
     }
     for dir in dirs {
@@ -226,7 +226,7 @@ fn find_config_file() -> Option<PathBuf> {
             "config.yaml",
             "config.yml",
             "config.json",
-            ".difft.toml",
+            ".diffv.toml",
         ] {
             let p = dir.join(name);
             if p.is_file() {
@@ -248,7 +248,7 @@ fn parse_file(path: &Path) -> Option<Config> {
     match result {
         Ok(c) => Some(c),
         Err(e) => {
-            eprintln!("difft: ignoring bad config {}: {e}", path.display());
+            eprintln!("diffv: ignoring bad config {}: {e}", path.display());
             None
         }
     }
