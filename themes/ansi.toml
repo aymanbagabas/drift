@@ -1,0 +1,54 @@
+# diffv ANSI theme: uses your terminal's own 16 ANSI colors (plus the
+# terminal default fg/bg), so it matches whatever palette your terminal
+# defines. 256-color terminals can also reference indices 0-255 directly.
+#
+# Copy this to ~/.config/diffv/config.toml and tweak to taste, or pass it
+# with --config. Color tokens accept ANSI names (black, red, green, yellow,
+# blue, magenta, cyan, white and their bright* variants), a 0-255 index, a
+# literal `#rrggbb`, or `default`/`none`/`-` for the terminal default.
+
+theme = "ansi"
+syntax = false           # 16 ANSI colors collide with syntax hues; keep text plain
+intraline = false        # too few colors to emphasize word changes cleanly
+line_numbers = true
+tab_width = 4
+
+[colors]
+add         = "green"
+remove      = "red"
+context     = "default"      # terminal default foreground
+header      = "blue"
+line_number = "brightblack"
+primary     = "magenta"      # logo badge background
+secondary   = "blue"         # help badge, dialog border
+foreground  = "default"
+background  = "default"      # terminal default background
+muted       = "brightblack"
+surface     = "brightblack"  # status bar / chip background
+cursor      = "brightblack"  # current-line highlight
+add_line    = "default"      # keep terminal bg; emphasis carries the change
+remove_line = "default"
+add_emph    = "green"
+remove_emph = "red"
+
+# Component styles: `fg bg attrs...`. Attrs: bold, faint/dim, italic,
+# underline, strikethrough, blink, reverse, conceal.
+[styles]
+add                = "add"
+remove             = "remove"
+context            = "context"
+header             = "header bold"
+line_number        = "line_number"
+statusbar          = "foreground surface"
+statusbar_logo     = "background primary bold"
+statusbar_filename = "foreground surface bold"
+statusbar_add      = "add surface"
+statusbar_remove   = "remove surface"
+statusbar_flags    = "muted surface"
+statusbar_stats    = "foreground surface"
+statusbar_watch    = "background add bold"
+statusbar_help     = "background secondary bold"
+help_key           = "muted bold"
+help_desc          = "muted faint"
+dialog             = "foreground background"
+dialog_border      = "secondary background"

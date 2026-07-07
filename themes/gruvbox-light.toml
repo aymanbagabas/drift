@@ -1,0 +1,54 @@
+# diffv Gruvbox Light theme.
+#
+# Copy this to ~/.config/diffv/config.toml and tweak to taste, or pass it
+# with --config. `[colors]` is the palette; `[styles]` maps named UI
+# components to a `fg bg attrs...` spec resolved against that palette. Any
+# color token also accepts a literal `#rrggbb`, a 0-255 index, or an ANSI
+# name (e.g. `blue`). Use `default`, `none`, or `-` for the terminal's
+# own default color (works for both fg and bg).
+
+theme = "gruvbox-light"
+syntax = true            # highlight diff content
+intraline = true         # word-level change emphasis
+line_numbers = true      # old/new line-number gutter
+tab_width = 4
+
+[colors]
+add         = "#79740e"  # green
+remove      = "#9d0006"  # red
+context     = "#3c3836"  # foreground
+header      = "#076678"  # blue
+line_number = "#928374"  # grey
+primary     = "#8f3f71"  # purple  (logo badge background)
+secondary   = "#076678"  # blue    (help badge, dialog border)
+foreground  = "#3c3836"
+background  = "#fbf1c7"
+muted       = "#928374"
+surface     = "#ebdbb2"  # status bar / chip background
+cursor      = "#d5c4a1"  # current-line highlight
+add_line    = "#ded69e"  # whole-line wash for added lines
+remove_line = "#e6bc9d"  # whole-line wash for removed lines
+add_emph    = "#c4bc79"  # intra-line changed-word background (added)
+remove_emph = "#d48c76"  # intra-line changed-word background (removed)
+
+# Component styles: `fg bg attrs...`. Attrs: bold, faint/dim, italic,
+# underline, strikethrough, blink, reverse, conceal.
+[styles]
+add                = "add"
+remove             = "remove"
+context            = "context"
+header             = "header bold"
+line_number        = "line_number"
+statusbar          = "foreground surface"
+statusbar_logo     = "background primary bold"
+statusbar_filename = "foreground surface bold"
+statusbar_add      = "add surface"
+statusbar_remove   = "remove surface"
+statusbar_flags    = "muted surface"
+statusbar_stats    = "foreground surface"
+statusbar_watch    = "background add bold"
+statusbar_help     = "background secondary bold"
+help_key           = "muted bold"
+help_desc          = "muted faint"
+dialog             = "foreground background"
+dialog_border      = "secondary background"

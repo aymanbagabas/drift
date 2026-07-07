@@ -8,7 +8,7 @@ use syntect::highlighting::{
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use uncurses::color::Color;
 
-use crate::config::builtin;
+use crate::config::{builtin, builtin_named, Builtin};
 
 pub struct Highlighter {
     syntaxes: SyntaxSet,
@@ -19,14 +19,15 @@ pub struct Highlighter {
 impl Highlighter {
     pub fn new(theme_name: &str, enabled: bool) -> Self {
         let syntaxes = SyntaxSet::load_defaults_newlines();
-        let theme = match theme_name {
-            "onedark" => builtin_theme(true),
-            "onelight" => builtin_theme(false),
-            other => ThemeSet::load_defaults()
+        // The `ansi` palette holds ANSI color names (not hex) and is meant to
+        // run with syntax highlighting off, so it never builds a syntect theme.
+        let theme = match builtin_named(theme_name) {
+            Some(b) if theme_name != "ansi" => builtin_theme(theme_name, &b),
+            _ => ThemeSet::load_defaults()
                 .themes
-                .get(other)
+                .get(theme_name)
                 .cloned()
-                .unwrap_or_else(|| builtin_theme(true)),
+                .unwrap_or_else(|| builtin_theme("onedark", &builtin(true))),
         };
         Highlighter {
             syntaxes,
@@ -98,10 +99,9 @@ fn hexc(h: &str) -> SynColor {
     }
 }
 
-/// Build a syntect theme from the onedark/onelight palette, mapping the common
+/// Build a syntect theme from a named built-in palette, mapping the common
 /// scopes to the palette hues so highlighting matches the UI colors.
-fn builtin_theme(dark: bool) -> Theme {
-    let b = builtin(dark);
+fn builtin_theme(name: &str, b: &Builtin) -> Theme {
     let item = |scope: &str, hex: &str, italic: bool| ThemeItem {
         scope: scope.parse().unwrap(),
         style: syntect::highlighting::StyleModifier {
@@ -111,7 +111,7 @@ fn builtin_theme(dark: bool) -> Theme {
         },
     };
     Theme {
-        name: Some(if dark { "onedark" } else { "onelight" }.to_string()),
+        name: Some(name.to_string()),
         author: None,
         settings: ThemeSettings {
             background: Some(hexc(b.bg)),
@@ -138,3 +138,4 @@ fn builtin_theme(dark: bool) -> Theme {
         ],
     }
 }
+

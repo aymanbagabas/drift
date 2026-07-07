@@ -1,0 +1,54 @@
+# diffv Tokyo Night theme.
+#
+# Copy this to ~/.config/diffv/config.toml and tweak to taste, or pass it
+# with --config. `[colors]` is the palette; `[styles]` maps named UI
+# components to a `fg bg attrs...` spec resolved against that palette. Any
+# color token also accepts a literal `#rrggbb`, a 0-255 index, or an ANSI
+# name (e.g. `blue`). Use `default`, `none`, or `-` for the terminal's
+# own default color (works for both fg and bg).
+
+theme = "tokyonight"
+syntax = true            # highlight diff content
+intraline = true         # word-level change emphasis
+line_numbers = true      # old/new line-number gutter
+tab_width = 4
+
+[colors]
+add         = "#9ece6a"  # green
+remove      = "#f7768e"  # red
+context     = "#c0caf5"  # foreground
+header      = "#7aa2f7"  # blue
+line_number = "#565f89"  # grey
+primary     = "#bb9af7"  # purple  (logo badge background)
+secondary   = "#7aa2f7"  # blue    (help badge, dialog border)
+foreground  = "#c0caf5"
+background  = "#1a1b26"
+muted       = "#565f89"
+surface     = "#24283b"  # status bar / chip background
+cursor      = "#292e42"  # current-line highlight
+add_line    = "#2f3831"  # whole-line wash for added lines
+remove_line = "#3d2a37"  # whole-line wash for removed lines
+add_emph    = "#47583d"  # intra-line changed-word background (added)
+remove_emph = "#653a49"  # intra-line changed-word background (removed)
+
+# Component styles: `fg bg attrs...`. Attrs: bold, faint/dim, italic,
+# underline, strikethrough, blink, reverse, conceal.
+[styles]
+add                = "add"
+remove             = "remove"
+context            = "context"
+header             = "header bold"
+line_number        = "line_number"
+statusbar          = "foreground surface"
+statusbar_logo     = "background primary bold"
+statusbar_filename = "foreground surface bold"
+statusbar_add      = "add surface"
+statusbar_remove   = "remove surface"
+statusbar_flags    = "muted surface"
+statusbar_stats    = "foreground surface"
+statusbar_watch    = "background add bold"
+statusbar_help     = "background secondary bold"
+help_key           = "muted bold"
+help_desc          = "muted faint"
+dialog             = "foreground background"
+dialog_border      = "secondary background"
