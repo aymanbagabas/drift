@@ -71,6 +71,13 @@ fn main() {
 fn run() -> std::io::Result<()> {
     let cli = Cli::parse();
 
+    // Resolve a relative `-c` path against the *original* working directory
+    // before `-C` changes it, so the two flags compose.
+    let config_path = cli
+        .config
+        .as_deref()
+        .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+
     // Change directory first so git, config discovery, and watching all
     // operate against the requested repository.
     if let Some(dir) = &cli.directory {
@@ -78,7 +85,7 @@ fn run() -> std::io::Result<()> {
             .map_err(|e| std::io::Error::other(format!("cannot enter {}: {e}", dir.display())))?;
     }
 
-    let mut cfg = Config::load(cli.config.as_deref());
+    let mut cfg = Config::load(config_path.as_deref());
     if cli.no_syntax {
         cfg.syntax = false;
     }
