@@ -520,7 +520,7 @@ impl App {
         let entries = Self::help_entries();
         let cell_w = entries
             .iter()
-            .map(|(k, v)| k.chars().count() + 2 + v.chars().count())
+            .map(|(k, v)| self.width(k) as usize + 2 + self.width(v) as usize)
             .max()
             .unwrap_or(12)
             + 3; // gap between columns
@@ -1086,13 +1086,13 @@ impl App {
         // Right edge, laid out right-to-left: "? help" badge, the watch badge
         // (only when watch mode is on), then the global diffstat.
         let help_badge = " ? help ";
-        let help_x = w.saturating_sub(help_badge.chars().count() as u16);
+        let help_x = w.saturating_sub(self.width(help_badge));
         self.screen
             .set_str((help_x, row), help_badge, self.theme.statusbar_help.clone());
 
         let w_x = if self.watch {
             let w_badge = " W ";
-            let wx = help_x.saturating_sub(w_badge.chars().count() as u16);
+            let wx = help_x.saturating_sub(self.width(w_badge));
             self.screen
                 .set_str((wx, row), w_badge, self.theme.statusbar_watch.clone());
             wx
@@ -1102,7 +1102,7 @@ impl App {
 
         // Global stats.
         let stats = format!(" {nf} files +{add} -{del} ");
-        let stats_x = w_x.saturating_sub(stats.chars().count() as u16);
+        let stats_x = w_x.saturating_sub(self.width(&stats));
         self.screen
             .set_str((stats_x, row), &stats, self.theme.statusbar_stats.clone());
 
@@ -1110,14 +1110,14 @@ impl App {
         let app = " diffv ";
         self.screen
             .set_str((0, row), app, self.theme.statusbar_logo.clone());
-        let mut x = app.chars().count() as u16;
+        let mut x = self.width(app);
 
         // File name.
         let name_seg = format!(" {name}");
-        let name_clip = clip(&name_seg, stats_x.saturating_sub(x));
+        let (name_clip, name_w) = self.clip(&name_seg, stats_x.saturating_sub(x));
         self.screen
             .set_str((x, row), &name_clip, self.theme.statusbar_filename.clone());
-        x += name_clip.chars().count() as u16;
+        x += name_w;
 
         // Per-file line stats and flags, a muted group next to the file name.
         if let Some(f) = file {
@@ -1126,9 +1126,9 @@ impl App {
                 if *x >= stats_x {
                     return;
                 }
-                let t = clip(text, stats_x - *x);
+                let (t, tw) = s.clip(text, stats_x - *x);
                 s.screen.set_str((*x, row), &t, style);
-                *x += t.chars().count() as u16;
+                *x += tw;
             };
             put(self, &mut x, " +", self.theme.statusbar_add.clone());
             put(self, &mut x, &fa.to_string(), self.theme.statusbar_add.clone());
@@ -1146,7 +1146,7 @@ impl App {
         if let Some((msg, _)) = self.flash.clone() {
             if x < stats_x {
                 let badge = format!(" {msg} ");
-                let badge = clip(&badge, stats_x - x);
+                let (badge, _) = self.clip(&badge, stats_x - x);
                 self.screen
                     .set_str((x, row), &badge, self.theme.statusbar_add.clone());
             }
@@ -1162,7 +1162,7 @@ impl App {
         let desc_style = self.theme.help_desc.clone();
         // Descriptions align to a fixed column so keys and descriptions line up
         // regardless of individual key width.
-        let key_w = entries.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0) as u16;
+        let key_w = entries.iter().map(|(k, _)| self.width(k)).max().unwrap_or(0);
         for (i, (k, v)) in entries.iter().enumerate() {
             let col = i / rows;
             let r = i % rows;
@@ -1221,7 +1221,7 @@ impl App {
         let name_w = self
             .files
             .iter()
-            .map(|f| f.path().chars().count())
+            .map(|f| self.width(f.path()) as usize)
             .max()
             .unwrap_or(10)
             .clamp(10, (w as usize).saturating_sub(24));
@@ -1256,18 +1256,19 @@ impl App {
             let y = iy + i as u16;
             let selected = idx == self.selected;
             let marker = if selected { "▸" } else { " " };
-            let name = shorten(file.path(), name_w);
+            let name = self.shorten(file.path(), name_w as u16);
             let name_style = if selected {
                 on_bg.clone().bold()
             } else {
                 on_bg.clone()
             };
+            let pad = (name_w as u16).saturating_sub(self.width(&name)) as usize;
             self.screen
-                .set_str((ix, y), &format!("{marker}{name:<name_w$}"), name_style);
+                .set_str((ix, y), &format!("{marker}{name}{}", " ".repeat(pad)), name_style);
             let count = format!(" {:>count_w$} ", a + d);
             let cx = ix + 1 + name_w as u16;
             self.screen.set_str((cx, y), &count, on_bg.clone());
-            let bx = cx + count.chars().count() as u16;
+            let bx = cx + self.width(&count);
             let scaled = |n: usize| if n == 0 { 0 } else { ((n * bar_w) / max_count).max(1) };
             let ap = scaled(a);
             let dp = scaled(d).min(bar_w.saturating_sub(ap));
@@ -1286,7 +1287,7 @@ impl App {
         );
         self.screen.set_str(
             (ix, iy + inner_h - 1),
-            &clip(&summary, inner_w),
+            &self.clip(&summary, inner_w).0,
             on_bg.bold(),
         );
     }
@@ -1437,13 +1438,13 @@ impl App {
             RowKind::Remove => ("-", &self.theme.remove, self.theme.remove.clone().bold()),
             RowKind::Context => (" ", &self.theme.context, self.theme.context.clone()),
             RowKind::Hunk => {
-                let s = clip(&r.spans[0].text, width);
+                let (s, _) = self.clip(&r.spans[0].text, width);
                 self.screen
                     .set_str((cx, y), &s, bg(self.theme.header.clone().faint()));
                 return;
             }
             RowKind::Note => {
-                let s = clip(&r.spans[0].text, width);
+                let (s, _) = self.clip(&r.spans[0].text, width);
                 self.screen
                     .set_str((cx, y), &s, bg(self.theme.context.clone().faint()));
                 return;
@@ -1463,7 +1464,7 @@ impl App {
                 break;
             }
             let remaining = (avail - cx) as usize;
-            let text = clip(&span.text, remaining as u16);
+            let (text, cw) = self.clip(&span.text, remaining as u16);
             if text.is_empty() {
                 continue;
             }
@@ -1477,7 +1478,6 @@ impl App {
                     style = style.bg(bgc).bold();
                 }
             }
-            let cw = text.chars().count() as u16;
             self.screen.set_str((cx, y), &text, bg(style));
             cx += cw;
         }
@@ -1485,6 +1485,30 @@ impl App {
 
     pub fn finish(self) -> io::Result<()> {
         self.screen.finish()
+    }
+
+    /// Truncate `s` to at most `width` display columns, respecting grapheme
+    /// clusters and wide characters. Uses the screen's own width mode + EAW
+    /// policy so a cell budget matches what `set_str` actually paints.
+    fn clip(&self, s: &str, width: u16) -> (String, u16) {
+        fit(self.screen.grapheme_cells(s), width)
+    }
+
+    /// Display width of `s` in terminal columns under the screen's width mode.
+    fn width(&self, s: &str) -> u16 {
+        self.screen.grapheme_cells(s).map(|(_, w)| w as u16).sum()
+    }
+
+    /// Shorten `s` to at most `width` display columns, keeping the tail (e.g. a
+    /// filename) visible behind a leading ellipsis. Width-aware so wide/non-ASCII
+    /// paths never overflow or split a cluster.
+    fn shorten(&self, s: &str, width: u16) -> String {
+        if self.width(s) <= width {
+            return s.to_string();
+        }
+        let ell = self.screen.grapheme_width("…") as u16;
+        let cells: Vec<(&str, u8)> = self.screen.grapheme_cells(s).collect();
+        format!("…{}", fit_tail(&cells, width.saturating_sub(ell)))
     }
 }
 
@@ -1593,33 +1617,48 @@ fn merge(
     out
 }
 
-fn clip(s: &str, width: u16) -> String {
+/// Fit `(cluster, width)` pairs into at most `width` columns without splitting a
+/// wide cluster. Returns the fitted string and the columns it occupies.
+fn fit<'a>(cells: impl Iterator<Item = (&'a str, u8)>, width: u16) -> (String, u16) {
     let mut out = String::new();
-    let mut w = 0usize;
-    for ch in s.chars() {
-        let cw = if (ch as u32) < 0x20 { 0 } else { 1 };
-        if w + cw > width as usize {
+    let mut w = 0u16;
+    for (g, gw) in cells {
+        let gw = gw as u16;
+        if w + gw > width {
             break;
         }
-        out.push(ch);
-        w += cw;
+        out.push_str(g);
+        w += gw;
     }
-    out
+    (out, w)
 }
 
-/// Shorten a path to fit, keeping the tail (filename) visible.
-fn shorten(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
-        return s.to_string();
+/// Take clusters from the end of `cells` that fit in `budget` columns, keeping
+/// the tail intact without splitting a wide cluster. Used by `shorten`.
+fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
+    let mut w = 0u16;
+    let mut start = cells.len();
+    for i in (0..cells.len()).rev() {
+        let cw = cells[i].1 as u16;
+        if w + cw > budget {
+            break;
+        }
+        w += cw;
+        start = i;
     }
-    let tail: String = s.chars().rev().take(width.saturating_sub(1)).collect();
-    let tail: String = tail.chars().rev().collect();
-    format!("…{tail}")
+    cells[start..].iter().map(|(g, _)| *g).collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{slice_cells, text_cells, Sel};
+    use super::{fit, fit_tail, slice_cells, text_cells, Sel};
+    use uncurses::text::{grapheme_cells, WidthMode};
+
+    // Exercise the same fitting logic clip() uses; clip() itself needs a live
+    // screen, so we feed grapheme_cells directly here.
+    fn clip(s: &str, width: u16) -> (String, u16) {
+        fit(grapheme_cells(s, WidthMode::Grapheme, false), width)
+    }
 
     fn sel(a_row: usize, a_col: usize, c_row: usize, c_col: usize) -> Sel {
         Sel { a_row, a_col, c_row, c_col, dragging: false }
@@ -1662,5 +1701,29 @@ mod tests {
         assert_eq!(slice_cells(&c, 0, 4), "a世b");
         // Selecting only the wide cell (not its continuation) still yields it.
         assert_eq!(slice_cells(&c, 1, 2), "世");
+    }
+
+    #[test]
+    fn clip_counts_display_columns() {
+        // ASCII: one column per char.
+        assert_eq!(clip("hello", 3), ("hel".into(), 3));
+        assert_eq!(clip("hi", 10), ("hi".into(), 2));
+        // Wide chars cost two columns; a budget of 3 fits one wide + nothing
+        // more (the next wide would overflow), not two chars.
+        assert_eq!(clip("世界", 3), ("世".into(), 2));
+        assert_eq!(clip("世界", 4), ("世界".into(), 4));
+        // A wide char never gets split across the boundary.
+        assert_eq!(clip("a世", 2), ("a".into(), 1));
+    }
+
+    #[test]
+    fn fit_tail_keeps_end_width_aware() {
+        let cells: Vec<_> = grapheme_cells("src/世界.rs", WidthMode::Grapheme, false).collect();
+        // Budget keeps the tail; a wide cluster is never split at the boundary.
+        assert_eq!(fit_tail(&cells, 5), "界.rs");
+        assert_eq!(fit_tail(&cells, 6), "界.rs");
+        assert_eq!(fit_tail(&cells, 7), "世界.rs");
+        // Zero budget keeps nothing.
+        assert_eq!(fit_tail(&cells, 0), "");
     }
 }
