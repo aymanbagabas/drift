@@ -186,7 +186,11 @@ fn text_cells(s: &str) -> Line {
     for (g, w) in grapheme_cells(s, WidthMode::Grapheme, false) {
         if w >= 2 {
             cells.push(Cell::wide(g));
-            cells.push(Cell::continuation());
+            // One continuation cell per extra column, so `cells.len()` equals
+            // the grapheme's display width for any wide cluster.
+            for _ in 1..w {
+                cells.push(Cell::continuation());
+            }
         } else if w == 1 {
             cells.push(Cell::narrow(g));
         }
