@@ -7,13 +7,14 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
 
-use uncurses::buffer::{Bounded, SurfaceMut};
+use uncurses::buffer::{Bounded, Line, SurfaceMut};
+use uncurses::cell::Cell;
 use uncurses::color::Color;
 use uncurses::event::{Event, MouseButton};
 use uncurses::screen::{MouseTracking, Screen, ScreenOptions};
 use uncurses::style::Style;
 use uncurses::terminal::{TtyInput, TtyOutput};
-use uncurses::text::TextSurface;
+use uncurses::text::{grapheme_cells, TextSurface, WidthMode};
 
 use crate::config::{parse_style, Config, Palette};
 use crate::diff::{self, FileDiff, LineKind};
@@ -124,6 +125,83 @@ struct Row {
     old_no: Option<usize>,
     new_no: Option<usize>,
     spans: Vec<Span>,
+    /// The row's content parsed into display cells once, so selection can read
+    /// exact column-to-text mapping (wide chars included) without touching the
+    /// screen. A cell index equals a screen column offset from `content_start`.
+    content: Line,
+}
+
+impl Row {
+    fn new(kind: RowKind, old_no: Option<usize>, new_no: Option<usize>, spans: Vec<Span>) -> Self {
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        let content = text_cells(&text);
+        Row {
+            kind,
+            old_no,
+            new_no,
+            spans,
+            content,
+        }
+    }
+}
+
+/// A mouse text selection anchored to the content model (not the screen), so
+/// it survives scrolling and can span more rows than fit on screen. `a_*` is
+/// where the drag began, `c_*` follows the pointer. `col` is a **cell** index
+/// into the row's content cells (span text only: no gutter, no +/- sign).
+#[derive(Clone, Copy)]
+struct Sel {
+    a_row: usize,
+    a_col: usize,
+    c_row: usize,
+    c_col: usize,
+    dragging: bool,
+}
+
+impl Sel {
+    /// (start_row, start_col, end_row, end_col) in reading order.
+    fn ordered(&self) -> (usize, usize, usize, usize) {
+        if (self.a_row, self.a_col) <= (self.c_row, self.c_col) {
+            (self.a_row, self.a_col, self.c_row, self.c_col)
+        } else {
+            (self.c_row, self.c_col, self.a_row, self.a_col)
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.a_row == self.c_row && self.a_col == self.c_col
+    }
+}
+
+/// Parse a string into display cells, inserting a continuation cell after each
+/// wide grapheme so `cells.len()` equals the string's width in terminal columns.
+/// That makes a cell index equal to a screen column, matching how the renderer
+/// lays the same text out. Selection reads these instead of the screen buffer,
+/// so it works even when the selection is taller than the viewport.
+fn text_cells(s: &str) -> Line {
+    let mut cells = Line::new();
+    for (g, w) in grapheme_cells(s, WidthMode::Grapheme, false) {
+        if w >= 2 {
+            cells.push(Cell::wide(g));
+            cells.push(Cell::continuation());
+        } else if w == 1 {
+            cells.push(Cell::narrow(g));
+        }
+    }
+    cells
+}
+
+/// Join cells `[start, end)` into a string, trimming trailing blanks the way a
+/// terminal copy does. Continuation cells contribute "" so a wide char appears
+/// exactly once. Indices are clamped to the cell slice.
+fn slice_cells(cells: &[Cell], start: usize, end: usize) -> String {
+    let s = start.min(cells.len());
+    let e = end.min(cells.len()).max(s);
+    let mut line: String = cells[s..e].iter().map(|c| c.content()).collect();
+    while line.ends_with(' ') {
+        line.pop();
+    }
+    line
 }
 
 pub struct App {
@@ -156,6 +234,10 @@ pub struct App {
     /// Extra lines of context added on top of the base setting, grown by
     /// expanding folded regions with Enter on a hunk header.
     expand: usize,
+    /// Active mouse text selection, drawn reversed and yanked with `y`.
+    sel: Option<Sel>,
+    /// Transient footer note (e.g. "copied 3 lines"), cleared on next keypress.
+    flash: Option<String>,
 }
 
 impl App {
@@ -194,6 +276,8 @@ impl App {
             title: String::new(),
             watch: false,
             expand: 0,
+            sel: None,
+            flash: None,
         };
         app.start();
         Ok(app)
@@ -398,6 +482,7 @@ impl App {
             ("w", "watch on/off"),
             ("enter", "expand / open"),
             ("e", "edit in $EDITOR"),
+            ("y", "copy selection"),
             ("r", "refresh"),
             ("?", "toggle help"),
             ("q", "quit"),
@@ -422,6 +507,51 @@ impl App {
 
     fn max_scroll(&self) -> usize {
         self.rows().len().saturating_sub(self.viewport_rows())
+    }
+
+    /// Scroll the viewport by `delta` rows without moving the cursor, clamped to
+    /// the content. Used by drag-select to auto-scroll past the visible edge.
+    fn scroll_by(&mut self, delta: isize) {
+        let max = self.max_scroll() as isize;
+        self.scroll = (self.scroll as isize + delta).clamp(0, max) as usize;
+    }
+
+    /// Width of the line-number gutter for a pane, matching what
+    /// [`Self::draw_diff_row`] draws.
+    fn gutter_w(&self, gut: Gut) -> u16 {
+        if !self.config.line_numbers {
+            0
+        } else {
+            match gut {
+                Gut::Both => 9,
+                Gut::Old | Gut::New => 5,
+            }
+        }
+    }
+
+    /// Screen column, within a pane, where a row's content begins: after the
+    /// gutter and the one-column +/- sign (hunk/note rows have no sign).
+    fn content_start(&self, kind: RowKind, gut: Gut) -> u16 {
+        let sign = if matches!(kind, RowKind::Add | RowKind::Remove | RowKind::Context) {
+            1
+        } else {
+            0
+        };
+        self.gutter_w(gut) + sign
+    }
+
+    /// Map a pointer at screen (x, y) to a (row, content-column) position in the
+    /// unified view. Column is a character index into the row's content.
+    fn point_to_content(&self, x: u16, y: u16) -> (usize, usize) {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return (0, 0);
+        }
+        let row = (self.scroll + y as usize).min(rows.len() - 1);
+        let cs = self.content_start(rows[row].kind, Gut::Both);
+        let len = rows[row].content.len();
+        let col = (x.saturating_sub(cs) as usize).min(len);
+        (row, col)
     }
 
     /// Move the cursor line by `delta`, then scroll the viewport just enough to
@@ -589,7 +719,15 @@ impl App {
                 }
                 if k.matches_any(["q", "escape", "ctrl+c"]) {
                     return Ok(true);
-                } else if k.matches_any(["j", "down"]) {
+                } else if k.matches("y") {
+                    self.yank()?;
+                    return Ok(false);
+                }
+                // Any other navigation key cancels an active selection and its
+                // "copied" note.
+                self.sel = None;
+                self.flash = None;
+                if k.matches_any(["j", "down"]) {
                     self.move_cursor(1);
                 } else if k.matches_any(["k", "up"]) {
                     self.move_cursor(-1);
@@ -632,6 +770,8 @@ impl App {
                 }
             }
             Event::MouseWheel(m) => {
+                // Scrolling moves content under any selection, so drop it.
+                self.sel = None;
                 if m.button == MouseButton::WheelUp {
                     self.move_cursor(-3);
                 } else if m.button == MouseButton::WheelDown {
@@ -645,10 +785,56 @@ impl App {
                     if m.y + 1 < h {
                         let row = m.y as usize;
                         self.set_cursor(self.scroll + row);
+                        // Text selection is only offered in the unified view;
+                        // split panes have no single reading order.
+                        self.flash = None;
+                        if !self.split {
+                            let (r, c) = self.point_to_content(m.x, m.y);
+                            self.sel = Some(Sel {
+                                a_row: r,
+                                a_col: c,
+                                c_row: r,
+                                c_col: c,
+                                dragging: true,
+                            });
+                        }
+                    }
+                }
+            }
+            Event::MouseMove(m) => {
+                // With button tracking (mode 1002) motion is only reported
+                // while a button is held, so any move during a drag extends the
+                // selection.
+                if self.sel.is_some_and(|s| s.dragging) {
+                    let body_h = self.viewport_rows() as u16;
+                    // Dragging past the top/bottom edge scrolls, so a selection
+                    // can grow beyond the visible rows.
+                    if m.y == 0 {
+                        self.scroll_by(-1);
+                    } else if m.y + 1 >= body_h {
+                        self.scroll_by(1);
+                    }
+                    let y = m.y.min(body_h.saturating_sub(1));
+                    let (r, c) = self.point_to_content(m.x, y);
+                    if let Some(sel) = self.sel.as_mut() {
+                        sel.c_row = r;
+                        sel.c_col = c;
+                    }
+                }
+            }
+            Event::MouseRelease(m) => {
+                if m.button == MouseButton::Left {
+                    if let Some(sel) = self.sel.as_mut() {
+                        sel.dragging = false;
+                        // A click with no drag selects nothing.
+                        if sel.is_empty() {
+                            self.sel = None;
+                        }
                     }
                 }
             }
             Event::Resize(ws) => {
+                self.sel = None;
                 self.screen.resize((ws.col, ws.row));
                 self.move_cursor(0);
             }
@@ -681,8 +867,86 @@ impl App {
         }
     }
 
-    /// Set the terminal window title to "<filename> ● diffv", updating only
-    /// when it changes so we don't emit an OSC on every frame.
+    /// Copy the current mouse selection to the system clipboard via the
+    /// terminal's OSC 52 (uncurses `set_system_clipboard`), so it works over
+    /// SSH with no external clipboard tool. The text comes from the row model,
+    /// not the screen, so a selection taller than the viewport still copies in
+    /// full, without the line-number gutter or the +/- signs.
+    fn yank(&mut self) -> io::Result<()> {
+        let Some(sel) = self.sel else {
+            return Ok(());
+        };
+        let text = self.selection_text(sel);
+        self.sel = None;
+        if text.is_empty() {
+            return Ok(());
+        }
+        let lines = text.matches('\n').count() + 1;
+        self.screen.set_system_clipboard(text.as_bytes())?;
+        self.flash = Some(format!(
+            "copied {} line{}",
+            lines,
+            if lines == 1 { "" } else { "s" }
+        ));
+        Ok(())
+    }
+
+    /// Extract the selected region from the row content, in reading order.
+    fn selection_text(&self, sel: Sel) -> String {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return String::new();
+        }
+        let (sr, sc, er, ec) = sel.ordered();
+        let er = er.min(rows.len() - 1);
+        let mut lines = Vec::new();
+        for r in sr..=er {
+            let cells = &rows[r].content;
+            let start = if r == sr { sc } else { 0 };
+            let end = if r == er { ec } else { usize::MAX };
+            lines.push(slice_cells(cells, start, end));
+        }
+        lines.join("\n")
+    }
+
+    /// Reverse-video the selected content cells of the visible rows in the
+    /// freshly drawn frame.
+    fn paint_selection(&mut self, sel: Sel) {
+        let w = self.screen.width();
+        let body_h = self.viewport_rows();
+        let scroll = self.scroll;
+        let (sr, sc, er, ec) = sel.ordered();
+        // Compute the on-screen highlight span for each visible selected row up
+        // front, so the immutable row borrow is released before we touch cells.
+        let mut segs: Vec<(u16, u16, u16)> = Vec::new();
+        {
+            let rows = self.rows();
+            let er = er.min(rows.len().saturating_sub(1));
+            for r in sr..=er {
+                if r < scroll || r >= scroll + body_h {
+                    continue;
+                }
+                let row = &rows[r];
+                let cs = self.content_start(row.kind, Gut::Both);
+                let len = row.content.len() as u16;
+                let start = if r == sr { sc as u16 } else { 0 };
+                let end = if r == er { ec as u16 } else { len };
+                let sx = (cs + start.min(len)).min(w);
+                let ex = (cs + end.min(len)).min(w);
+                if ex > sx {
+                    segs.push(((r - scroll) as u16, sx, ex));
+                }
+            }
+        }
+        for (y, sx, ex) in segs {
+            for x in sx..ex {
+                if let Some(c) = self.screen.cell_mut((x, y)) {
+                    c.style = c.style.clone().reverse();
+                }
+            }
+        }
+    }
+
     fn update_title(&mut self) -> io::Result<()> {
         let want = match self.files.get(self.selected) {
             Some(f) => format!("{} · diffv", f.path()),
@@ -725,6 +989,10 @@ impl App {
         self.render_footer(footer_row);
         if self.help_open {
             self.render_help_grid(footer_row + 1, h);
+        }
+        // Overlay the selection highlight on top of the finished frame.
+        if let Some(sel) = self.sel {
+            self.paint_selection(sel);
         }
         self.screen.render()
     }
@@ -803,6 +1071,18 @@ impl App {
                 put(self, &mut x, &notes, self.theme.statusbar_flags.clone());
             }
             put(self, &mut x, " ", bar.clone());
+        }
+
+        // A transient "copied N lines" note takes over the file-name area until
+        // the next keypress.
+        if let Some(msg) = self.flash.clone() {
+            let badge = format!(" {msg} ");
+            let badge = clip(&badge, stats_x.saturating_sub(app.chars().count() as u16));
+            self.screen.set_str(
+                (app.chars().count() as u16, row),
+                &badge,
+                self.theme.statusbar_add.clone(),
+            );
         }
     }
 
@@ -1055,14 +1335,7 @@ impl App {
         if width == 0 {
             return;
         }
-        let num_w: u16 = if !self.config.line_numbers {
-            0
-        } else {
-            match gut {
-                Gut::Both => 9,
-                Gut::Old | Gut::New => 5,
-            }
-        };
+        let num_w: u16 = self.gutter_w(gut);
         // Wash the whole row so gaps also carry the line/cursor background.
         if let Some(c) = row_bg {
             self.screen
@@ -1157,30 +1430,30 @@ fn base_fg(style: &Style) -> Option<Color> {
 fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     if file.is_binary {
-        rows.push(Row {
-            kind: RowKind::Note,
-            old_no: None,
-            new_no: None,
-            spans: vec![Span {
+        rows.push(Row::new(
+            RowKind::Note,
+            None,
+            None,
+            vec![Span {
                 fg: None,
                 changed: false,
                 text: "Binary file — no textual diff".into(),
             }],
-        });
+        ));
         return rows;
     }
 
     for hunk in &file.hunks {
-        rows.push(Row {
-            kind: RowKind::Hunk,
-            old_no: None,
-            new_no: None,
-            spans: vec![Span {
+        rows.push(Row::new(
+            RowKind::Hunk,
+            None,
+            None,
+            vec![Span {
                 fg: None,
                 changed: false,
                 text: hunk.header.clone(),
             }],
-        });
+        ));
         let mut fh = hl.file(file.path());
         for line in &hunk.lines {
             let syntax_spans = fh.line(&line.content);
@@ -1190,12 +1463,7 @@ fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool) -> Vec<Ro
                 LineKind::Remove => RowKind::Remove,
                 LineKind::Context => RowKind::Context,
             };
-            rows.push(Row {
-                kind,
-                old_no: line.old_no,
-                new_no: line.new_no,
-                spans,
-            });
+            rows.push(Row::new(kind, line.old_no, line.new_no, spans));
         }
     }
     rows
@@ -1280,4 +1548,52 @@ fn shorten(s: &str, width: usize) -> String {
     let tail: String = s.chars().rev().take(width.saturating_sub(1)).collect();
     let tail: String = tail.chars().rev().collect();
     format!("…{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{slice_cells, text_cells, Sel};
+
+    fn sel(a_row: usize, a_col: usize, c_row: usize, c_col: usize) -> Sel {
+        Sel { a_row, a_col, c_row, c_col, dragging: false }
+    }
+
+    #[test]
+    fn selection_orders_reading_wise() {
+        // Dragging up/backward still yields start-before-end.
+        let s = sel(5, 8, 1, 2);
+        assert_eq!(s.ordered(), (1, 2, 5, 8));
+        let s = sel(1, 2, 5, 8);
+        assert_eq!(s.ordered(), (1, 2, 5, 8));
+    }
+
+    #[test]
+    fn empty_selection_detected() {
+        assert!(sel(3, 4, 3, 4).is_empty());
+        assert!(!sel(3, 4, 3, 5).is_empty());
+    }
+
+    #[test]
+    fn slice_cells_clamps_and_trims() {
+        // Whole line via an oversized end index, trailing blanks trimmed.
+        let c = text_cells("    return 1   ");
+        assert_eq!(slice_cells(&c, 0, usize::MAX), "    return 1");
+        // A mid-line span.
+        let c = text_cells("def foo():");
+        assert_eq!(slice_cells(&c, 4, 7), "foo");
+        // Start past the end yields empty.
+        let c = text_cells("abc");
+        assert_eq!(slice_cells(&c, 9, 9), "");
+    }
+
+    #[test]
+    fn wide_chars_occupy_two_cells() {
+        // A wide grapheme takes two cells (glyph + continuation), so a cell
+        // index maps 1:1 to a screen column. The continuation contributes "".
+        let c = text_cells("a世b");
+        assert_eq!(c.len(), 4);
+        assert_eq!(slice_cells(&c, 0, 4), "a世b");
+        // Selecting only the wide cell (not its continuation) still yields it.
+        assert_eq!(slice_cells(&c, 1, 2), "世");
+    }
 }
