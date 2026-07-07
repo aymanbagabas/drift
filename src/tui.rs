@@ -679,16 +679,29 @@ impl App {
         let page = self.viewport_rows() as isize;
         match ev {
             Event::KeyPress(k) => {
+                // Escape closes transient UI in priority order: an active
+                // selection first, then the stat modal. It never quits and
+                // never touches help (help is a toggle-only inline footer,
+                // closed with `?`).
+                if k.matches("escape") {
+                    if self.sel.is_some() {
+                        self.sel = None;
+                        self.flash = None;
+                    } else if self.view == View::Stat {
+                        self.view = View::Diff;
+                    }
+                    return Ok(false);
+                }
                 // Match with the uncurses key matcher: `matches` compares the
                 // produced glyph (so shifted symbols like `}` and uppercase
                 // synonyms work) and falls back to named-key patterns.
                 // The help grid is an inline footer, not a blocking overlay:
-                // `?`/esc toggle it off, every other key still works normally.
+                // `?` toggles it off, every other key still works normally.
                 if self.help_open {
                     if k.matches_any(["q", "ctrl+c"]) {
                         return Ok(true);
                     }
-                    if k.matches_any(["?", "escape"]) {
+                    if k.matches("?") {
                         self.help_open = false;
                         return Ok(false);
                     }
@@ -704,7 +717,7 @@ impl App {
                         self.selected = 0;
                     } else if k.matches_any(["G", "end"]) {
                         self.selected = self.files.len().saturating_sub(1);
-                    } else if k.matches_any(["f", "tab", "escape"]) {
+                    } else if k.matches_any(["f", "tab"]) {
                         self.view = View::Diff;
                     } else if k.matches("?") {
                         self.help_open = !self.help_open;
@@ -717,7 +730,7 @@ impl App {
                     }
                     return Ok(false);
                 }
-                if k.matches_any(["q", "escape", "ctrl+c"]) {
+                if k.matches_any(["q", "ctrl+c"]) {
                     return Ok(true);
                 } else if k.matches("y") {
                     self.yank()?;
