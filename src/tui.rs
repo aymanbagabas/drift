@@ -252,6 +252,9 @@ pub struct App {
     /// Transient footer note (e.g. "copied 3 lines") with the instant it was
     /// set, so it auto-expires after `FLASH`.
     flash: Option<(String, Instant)>,
+    /// Raw diff text last applied, so the worktree poll only rebuilds when the
+    /// unstaged diff actually changed (avoids jarring scroll resets on idle).
+    last_diff: String,
 }
 
 impl App {
@@ -299,6 +302,7 @@ impl App {
             expand: 0,
             sel: None,
             flash: None,
+            last_diff: String::new(),
         };
         app.start();
         Ok(app)
@@ -312,10 +316,12 @@ impl App {
             Ok(text) => {
                 self.files = diff::parse(&text);
                 self.raw_files = diff::split_files(&text);
+                self.last_diff = text;
             }
             Err(_) => {
                 self.files.clear();
                 self.raw_files.clear();
+                self.last_diff.clear();
             }
         }
         self.selected = 0;
@@ -393,20 +399,21 @@ impl App {
     /// Re-run the diff source and rebuild the view, keeping the cursor near
     /// where it was so refreshes and fold-expansions aren't jarring.
     fn reload(&mut self) {
+        let text = self.source.diff(&self.effective_opts()).unwrap_or_default();
+        self.rebuild_from(text);
+    }
+
+    /// Rebuild the view from already-fetched diff text, preserving the cursor
+    /// position. Shared by `reload` and the worktree poll (which passes the
+    /// text it just fetched to compare, avoiding a second git call).
+    fn rebuild_from(&mut self, text: String) {
         let (sel, cur) = (self.selected, self.cursor);
         // Drop any in-flight startup prefetch so its (now stale) rows can't
         // land in the freshly rebuilt cache.
         self.prefetch = None;
-        match self.source.diff(&self.effective_opts()) {
-            Ok(text) => {
-                self.files = diff::parse(&text);
-                self.raw_files = diff::split_files(&text);
-            }
-            Err(_) => {
-                self.files.clear();
-                self.raw_files.clear();
-            }
-        }
+        self.files = diff::parse(&text);
+        self.raw_files = diff::split_files(&text);
+        self.last_diff = text;
         self.selected = sel.min(self.files.len().saturating_sub(1));
         // Invalidate the per-file row cache; rows are rebuilt lazily on view.
         self.row_cache = (0..self.files.len()).map(|_| None).collect();
@@ -674,14 +681,25 @@ impl App {
         Ok(())
     }
 
-    pub fn run(&mut self, refresh: Option<Receiver<()>>, watch: bool) -> io::Result<()> {
+    pub fn run(
+        &mut self,
+        refresh: Option<Receiver<()>>,
+        watch: bool,
+        poll: Duration,
+    ) -> io::Result<()> {
         self.watch = watch;
+        let mut last_poll = Instant::now();
         loop {
             // Fold in any rows the startup worker has finished.
             self.drain_prefetch();
             // Expire a transient footer note after its lifetime.
             if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() >= FLASH) {
                 self.flash = None;
+            }
+            // Catch unstaged edits the git-internals watcher can't see.
+            if last_poll.elapsed() >= poll {
+                self.poll_worktree();
+                last_poll = Instant::now();
             }
             self.render()?;
             // Poll faster while the prefetch is still streaming so freshly
@@ -695,6 +713,10 @@ impl App {
             // time rather than on the next idle tick.
             if let Some((_, t)) = &self.flash {
                 timeout = timeout.min(FLASH.saturating_sub(t.elapsed()).max(Duration::from_millis(1)));
+            }
+            // Don't oversleep past the next worktree poll when watching.
+            if self.watch && self.source.reads_worktree() {
+                timeout = timeout.min(poll.max(Duration::from_millis(1)));
             }
             if self.screen.poll_event(Some(timeout))? {
                 // Drain every queued event before the next render so bursts
@@ -713,6 +735,21 @@ impl App {
                         self.reload();
                     }
                 }
+            }
+        }
+    }
+
+    /// Poll fallback for unstaged working-tree edits, which don't touch the
+    /// index or refs and so escape the git-internals watcher. Re-runs the diff
+    /// and rebuilds only when the text actually changed, so idle ticks with no
+    /// edits are free. Only active for worktree sources in watch mode.
+    fn poll_worktree(&mut self) {
+        if !self.watch || !self.source.reads_worktree() {
+            return;
+        }
+        if let Ok(text) = self.source.diff(&self.effective_opts()) {
+            if text != self.last_diff {
+                self.rebuild_from(text);
             }
         }
     }

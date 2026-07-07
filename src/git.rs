@@ -140,4 +140,11 @@ impl Source {
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+
+    /// Whether this source reflects unstaged working-tree edits, which touch
+    /// neither the index nor refs and so escape the git-internals watcher.
+    /// Only these need the polling fallback in watch mode.
+    pub fn reads_worktree(&self) -> bool {
+        matches!(self, Source::Worktree)
+    }
 }

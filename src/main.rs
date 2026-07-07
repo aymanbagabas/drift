@@ -9,6 +9,7 @@ mod watch;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -30,6 +31,11 @@ struct Cli {
     /// Watch the git index and refs and refresh the diff on change.
     #[arg(short, long)]
     watch: bool,
+
+    /// How often (ms) watch mode polls for unstaged working-tree edits, which
+    /// the git index/refs watcher can't see.
+    #[arg(long = "interval", value_name = "MS", default_value_t = 300)]
+    poll_interval: u64,
 
     /// Run as if diffv was started in this directory (like `git -C`). Works
     /// with worktrees and bare repositories.
@@ -146,7 +152,7 @@ fn run() -> std::io::Result<()> {
     let _ = &watcher_guard;
 
     let mut app = tui::App::new(cfg, source, opts)?;
-    let result = app.run(refresh, cli.watch);
+    let result = app.run(refresh, cli.watch, Duration::from_millis(cli.poll_interval));
     app.finish()?;
     result
 }
