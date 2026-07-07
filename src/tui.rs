@@ -974,6 +974,9 @@ impl App {
     /// Reverse-video the selected content cells of the visible rows in the
     /// freshly drawn frame.
     fn paint_selection(&mut self, sel: Sel) {
+        if self.rows().is_empty() {
+            return;
+        }
         let w = self.screen.width();
         let body_h = self.viewport_rows();
         let scroll = self.scroll;
