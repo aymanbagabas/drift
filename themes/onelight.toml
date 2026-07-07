@@ -4,7 +4,8 @@
 # with --config. `[colors]` is the palette; `[styles]` maps named UI
 # components to a `fg bg attrs...` spec resolved against that palette. Any
 # color token also accepts a literal `#rrggbb`, a 0-255 index, or an ANSI
-# name (e.g. `blue`). Use `-` for "no color".
+# name (e.g. `blue`). Use `default`, `none`, or `-` for the terminal's
+# own default color (works for both fg and bg).
 
 theme = "onelight"       # syntax-highlighting theme (onedark/onelight or a syntect name)
 syntax = true            # highlight diff content

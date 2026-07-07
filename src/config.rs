@@ -411,9 +411,10 @@ impl Palette {
     }
 
     /// Resolve a token to a color: a palette name, else a literal color value
-    /// (hex, index, or ANSI name). `none`/`default`/`-` mean "no color".
+    /// (hex, index, or ANSI name). `default`/`none`/`-` all mean "no color",
+    /// i.e. the terminal's own default fg/bg.
     pub fn color(&self, token: &str) -> Option<Color> {
-        if token == "-" {
+        if matches!(token, "-" | "none" | "default") {
             return None;
         }
         match self.map.get(token) {
@@ -490,5 +491,12 @@ mod tests {
         let s2 = parse_style("- primary", &pal);
         assert_eq!(s2.fg, None);
         assert_eq!(s2.bg, Some(Color::Cyan));
+        // `default`/`none` request the terminal's own color for either slot.
+        let s3 = parse_style("default primary", &pal);
+        assert_eq!(s3.fg, None);
+        assert_eq!(s3.bg, Some(Color::Cyan));
+        let s4 = parse_style("foreground none", &pal);
+        assert_eq!(s4.fg, Some(Color::White));
+        assert_eq!(s4.bg, None);
     }
 }
