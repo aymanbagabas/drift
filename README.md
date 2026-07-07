@@ -13,7 +13,7 @@ No config needed to start. Themes, colors, and keys are all yours to bend later.
 ## Install
 
 ```sh
-cargo install --path .
+cargo install diffv
 ```
 
 That drops a `diffv` binary on your `PATH`.
