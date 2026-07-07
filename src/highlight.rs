@@ -18,7 +18,7 @@ pub struct Highlighter {
 
 impl Highlighter {
     pub fn new(theme_name: &str, enabled: bool) -> Self {
-        let syntaxes = SyntaxSet::load_defaults_newlines();
+        let syntaxes = two_face::syntax::extra_newlines();
         // The `ansi` palette holds ANSI color names (not hex) and is meant to
         // run with syntax highlighting off, so it never builds a syntect theme.
         let theme = match builtin_named(theme_name) {
@@ -142,3 +142,20 @@ fn builtin_theme(name: &str, b: &Builtin) -> Theme {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Highlighter;
+
+    #[test]
+    fn highlights_typescript_and_react_variants() {
+        let hl = Highlighter::new("onedark", true);
+        // syntect's default set lacks these; two-face's extended set carries
+        // TypeScript, TypeScriptReact (.tsx), and JavaScript (Babel) (.jsx).
+        for path in ["m.ts", "app.tsx", "c.jsx"] {
+            let mut f = hl.file(path);
+            let spans = f.line("const x: number = foo();");
+            let colored = spans.iter().filter(|(c, _)| c.is_some()).count();
+            assert!(colored > 0, "{path} produced no colored spans");
+        }
+    }
+}
