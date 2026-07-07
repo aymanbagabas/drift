@@ -9,7 +9,7 @@ use uncurses::color::Color;
 use uncurses::style::Style;
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
     /// syntect theme name, e.g. "base16-ocean.dark".
     pub theme: String,
@@ -31,7 +31,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Colors {
     pub add: String,
     pub remove: String,
@@ -118,16 +118,15 @@ impl Config {
         cfg
     }
 
-    /// Fill any unset theme/color with the built-in onedark or onelight
-    /// palette, chosen by the terminal background.
+    /// Fill any unset theme/color from a built-in palette. The default theme is
+    /// `ansi`, which follows the terminal's own colors; unknown theme names
+    /// (e.g. a syntect theme) also fall back to the `ansi` palette.
     fn resolve_theme_defaults(&mut self) {
-        let dark = prefer_dark();
         if self.theme.is_empty() {
-            self.theme = if dark { "onedark" } else { "onelight" }.into();
+            self.theme = "ansi".into();
         }
-        // A named built-in palette fills unset fields; unknown names (e.g. a
-        // syntect theme) fall back to the background-appropriate default.
-        let b = builtin_named(&self.theme).unwrap_or_else(|| builtin(dark));
+        let b = builtin_named(&self.theme)
+            .unwrap_or_else(|| builtin_named("ansi").expect("ansi palette exists"));
         let c = &mut self.colors;
         let fill = |s: &mut String, v: &str| {
             if s.is_empty() {
@@ -167,39 +166,51 @@ impl Config {
                 continue;
             };
             let val = val.trim();
-            match key.trim_start_matches("diffv.").to_ascii_lowercase().as_str() {
-                "theme" => self.theme = val.to_string(),
-                "syntax" => self.syntax = parse_bool(val, self.syntax),
-                "intraline" => self.intraline = parse_bool(val, self.intraline),
-                "linenumbers" => self.line_numbers = parse_bool(val, self.line_numbers),
-                "tabwidth" => self.tab_width = val.parse().unwrap_or(self.tab_width),
-                "editor" => self.editor = val.to_string(),
-                "coloradd" => self.colors.add = val.to_string(),
-                "colorremove" => self.colors.remove = val.to_string(),
-                "colorcontext" => self.colors.context = val.to_string(),
-                "colorheader" => self.colors.header = val.to_string(),
-                "colorlinenumber" => self.colors.line_number = val.to_string(),
-                "colorprimary" => self.colors.primary = val.to_string(),
-                "colorsecondary" => self.colors.secondary = val.to_string(),
-                "colorforeground" => self.colors.foreground = val.to_string(),
-                "colorbackground" => self.colors.background = val.to_string(),
-                "colormuted" => self.colors.muted = val.to_string(),
-                "colorsurface" => self.colors.surface = val.to_string(),
-                "colorcursor" => self.colors.cursor = val.to_string(),
-                "coloraddemph" => self.colors.add_emph = val.to_string(),
-                "colorremoveemph" => self.colors.remove_emph = val.to_string(),
-                "coloraddline" => self.colors.add_line = val.to_string(),
-                "colorremoveline" => self.colors.remove_line = val.to_string(),
-                other => {
-                    // diffv.style<name> overrides a component style spec.
-                    if let Some(name) = other.strip_prefix("style") {
-                        if !name.is_empty() {
-                            self.styles.insert(name.to_string(), val.to_string());
-                        }
-                    }
+            let key = key.trim_start_matches("diffv.").to_ascii_lowercase();
+            // Colors and styles live in git subsections: `[diffv "colors"]` and
+            // `[diffv "styles"]`. Keys are kebab-case throughout (e.g.
+            // `add-emph`), matching the config-file and palette token names.
+            if let Some(field) = key.strip_prefix("colors.") {
+                self.set_color(field, val);
+            } else if let Some(name) = key.strip_prefix("styles.") {
+                self.styles.insert(name.to_string(), val.to_string());
+            } else {
+                match key.as_str() {
+                    "theme" => self.theme = val.to_string(),
+                    "syntax" => self.syntax = parse_bool(val, self.syntax),
+                    "intraline" => self.intraline = parse_bool(val, self.intraline),
+                    "line-numbers" => self.line_numbers = parse_bool(val, self.line_numbers),
+                    "tab-width" => self.tab_width = val.parse().unwrap_or(self.tab_width),
+                    "editor" => self.editor = val.to_string(),
+                    _ => {}
                 }
             }
         }
+    }
+
+    /// Set a single palette color by field name (matching the `[colors]` keys).
+    fn set_color(&mut self, field: &str, val: &str) {
+        let c = &mut self.colors;
+        let slot = match field {
+            "add" => &mut c.add,
+            "remove" => &mut c.remove,
+            "context" => &mut c.context,
+            "header" => &mut c.header,
+            "line-number" => &mut c.line_number,
+            "primary" => &mut c.primary,
+            "secondary" => &mut c.secondary,
+            "foreground" => &mut c.foreground,
+            "background" => &mut c.background,
+            "muted" => &mut c.muted,
+            "surface" => &mut c.surface,
+            "cursor" => &mut c.cursor,
+            "add-emph" => &mut c.add_emph,
+            "remove-emph" => &mut c.remove_emph,
+            "add-line" => &mut c.add_line,
+            "remove-line" => &mut c.remove_line,
+            _ => return,
+        };
+        *slot = val.to_string();
     }
 
     /// Resolve the editor command: config, then $VISUAL, $EDITOR, then vi.
@@ -211,6 +222,19 @@ impl Config {
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".into())
     }
+
+    /// Whether syntax highlighting is on. The `ansi` theme stays plain: with
+    /// only 16 terminal colors, layering highlight hues over the diff colors
+    /// reads worse than leaving code alone.
+    pub fn syntax_enabled(&self) -> bool {
+        self.syntax && self.theme != "ansi"
+    }
+
+    /// Whether intra-line (word-level) emphasis is on. Off for `ansi` for the
+    /// same reason as [`Self::syntax_enabled`].
+    pub fn intraline_enabled(&self) -> bool {
+        self.intraline && self.theme != "ansi"
+    }
 }
 
 fn find_config_file() -> Option<PathBuf> {
@@ -220,20 +244,25 @@ fn find_config_file() -> Option<PathBuf> {
     }
     if let Ok(home) = std::env::var("HOME") {
         dirs.push(PathBuf::from(&home).join(".config/diffv"));
-        dirs.push(PathBuf::from(home));
     }
-    for dir in dirs {
+    for dir in &dirs {
         for name in [
             "config.toml",
             "config.yaml",
             "config.yml",
             "config.json",
-            ".diffv.toml",
         ] {
             let p = dir.join(name);
             if p.is_file() {
                 return Some(p);
             }
+        }
+    }
+    // Also honor a `~/.diffv.toml` dotfile.
+    if let Ok(home) = std::env::var("HOME") {
+        let p = PathBuf::from(home).join(".diffv.toml");
+        if p.is_file() {
+            return Some(p);
         }
     }
     None
@@ -264,21 +293,6 @@ fn parse_bool(v: &str, default: bool) -> bool {
     }
 }
 
-/// Whether to prefer the dark palette. Uses the `COLORFGBG` hint (background
-/// index in the last field); defaults to dark when unknown.
-pub fn prefer_dark() -> bool {
-    // ponytail: COLORFGBG heuristic only; add an OSC 11 query if this misreads
-    // some terminals.
-    if let Ok(v) = std::env::var("COLORFGBG") {
-        if let Some(bg) = v.rsplit(';').next() {
-            if let Ok(n) = bg.trim().parse::<u8>() {
-                return matches!(n, 0..=6 | 8);
-            }
-        }
-    }
-    true
-}
-
 /// A built-in color palette: the named hues both the UI palette and the
 /// syntax theme are derived from.
 pub struct Builtin {
@@ -300,10 +314,13 @@ pub struct Builtin {
     pub remove_emph: &'static str,
 }
 
-/// The onedark (dark) or onelight (light) palette.
-pub fn builtin(dark: bool) -> Builtin {
-    if dark {
-        Builtin {
+/// Look up a named built-in palette. Returns None for unknown names (a syntect
+/// theme name, say), in which case callers fall back to the `ansi` palette.
+/// `ansi` maps to the terminal's own 16 colors so it inherits whatever palette
+/// the user's terminal defines.
+pub fn builtin_named(name: &str) -> Option<Builtin> {
+    match name {
+        "onedark" => Some(Builtin {
             bg: "#282c34",
             fg: "#abb2bf",
             red: "#e06c75",
@@ -320,9 +337,8 @@ pub fn builtin(dark: bool) -> Builtin {
             remove_line: "#3f2d30",
             add_emph: "#3d5943",
             remove_emph: "#6d3b40",
-        }
-    } else {
-        Builtin {
+        }),
+        "onelight" => Some(Builtin {
             bg: "#fafafa",
             fg: "#383a42",
             red: "#e45649",
@@ -339,18 +355,7 @@ pub fn builtin(dark: bool) -> Builtin {
             remove_line: "#fbe9e8",
             add_emph: "#cdead0",
             remove_emph: "#f7d3d0",
-        }
-    }
-}
-
-/// Look up a named built-in palette. Returns None for unknown names (callers
-/// fall back to the light/dark default). `onedark`/`onelight` delegate to
-/// [`builtin`]; `ansi` maps to the terminal's own 16 ANSI colors so it inherits
-/// whatever palette the user's terminal defines.
-pub fn builtin_named(name: &str) -> Option<Builtin> {
-    match name {
-        "onedark" => Some(builtin(true)),
-        "onelight" => Some(builtin(false)),
+        }),
         "ansi" => Some(Builtin {
             bg: "default",
             fg: "default",
@@ -606,7 +611,7 @@ impl Palette {
             ("remove", parse_color(&c.remove)),
             ("context", parse_color(&c.context)),
             ("header", parse_color(&c.header)),
-            ("line_number", parse_color(&c.line_number)),
+            ("line-number", parse_color(&c.line_number)),
             ("primary", parse_color(&c.primary)),
             ("secondary", parse_color(&c.secondary)),
             ("foreground", parse_color(&c.foreground)),
@@ -614,10 +619,10 @@ impl Palette {
             ("muted", parse_color(&c.muted)),
             ("surface", parse_color(&c.surface)),
             ("cursor", parse_color(&c.cursor)),
-            ("add_line", parse_color(&c.add_line)),
-            ("remove_line", parse_color(&c.remove_line)),
-            ("add_emph", parse_color(&c.add_emph)),
-            ("remove_emph", parse_color(&c.remove_emph)),
+            ("add-line", parse_color(&c.add_line)),
+            ("remove-line", parse_color(&c.remove_line)),
+            ("add-emph", parse_color(&c.add_emph)),
+            ("remove-emph", parse_color(&c.remove_emph)),
         ]);
         Palette { map }
     }

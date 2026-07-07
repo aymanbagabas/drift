@@ -10,15 +10,15 @@
 theme = "onedark"        # syntax-highlighting theme (onedark/onelight or a syntect name)
 syntax = true            # highlight diff content
 intraline = true         # word-level change emphasis
-line_numbers = true      # old/new line-number gutter
-tab_width = 4
+line-numbers = true      # old/new line-number gutter
+tab-width = 4
 
 [colors]
 add         = "#98c379"  # green
 remove      = "#e06c75"  # red
 context     = "#abb2bf"  # foreground
 header      = "#61afef"  # blue
-line_number = "#5c6370"  # grey
+line-number = "#5c6370"  # grey
 primary     = "#c678dd"  # purple  (logo badge background)
 secondary   = "#61afef"  # blue    (help badge, dialog border)
 foreground  = "#abb2bf"
@@ -26,10 +26,10 @@ background  = "#282c34"
 muted       = "#5c6370"
 surface     = "#3b4048"  # status bar / chip background
 cursor      = "#3e4451"  # current-line highlight
-add_line    = "#2b3a2e"  # whole-line wash for added lines
-remove_line = "#3f2d30"  # whole-line wash for removed lines
-add_emph    = "#3d5943"  # intra-line changed-word background (added)
-remove_emph = "#6d3b40"  # intra-line changed-word background (removed)
+add-line    = "#2b3a2e"  # whole-line wash for added lines
+remove-line = "#3f2d30"  # whole-line wash for removed lines
+add-emph    = "#3d5943"  # intra-line changed-word background (added)
+remove-emph = "#6d3b40"  # intra-line changed-word background (removed)
 
 # Component styles: `fg bg attrs...`. Attrs: bold, faint/dim, italic,
 # underline, strikethrough, blink, reverse, conceal.
@@ -38,17 +38,17 @@ add                = "add"
 remove             = "remove"
 context            = "context"
 header             = "header bold"
-line_number        = "line_number"
+line-number        = "line-number"
 statusbar          = "foreground surface"
-statusbar_logo     = "background primary bold"
-statusbar_filename = "foreground surface bold"
-statusbar_add      = "add surface"
-statusbar_remove   = "remove surface"
-statusbar_flags    = "muted surface"
-statusbar_stats    = "foreground surface"
-statusbar_watch    = "background add bold"
-statusbar_help     = "background secondary bold"
-help_key           = "muted bold"
-help_desc          = "muted faint"
+statusbar-logo     = "background primary bold"
+statusbar-filename = "foreground surface bold"
+statusbar-add      = "add surface"
+statusbar-remove   = "remove surface"
+statusbar-flags    = "muted surface"
+statusbar-stats    = "foreground surface"
+statusbar-watch    = "background add bold"
+statusbar-help     = "background secondary bold"
+help-key           = "muted bold"
+help-desc          = "muted faint"
 dialog             = "foreground background"
-dialog_border      = "secondary background"
+dialog-border      = "secondary background"

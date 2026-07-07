@@ -8,7 +8,7 @@ use syntect::highlighting::{
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use uncurses::color::Color;
 
-use crate::config::{builtin, builtin_named, Builtin};
+use crate::config::{builtin_named, Builtin};
 
 pub struct Highlighter {
     syntaxes: SyntaxSet,
@@ -27,7 +27,10 @@ impl Highlighter {
                 .themes
                 .get(theme_name)
                 .cloned()
-                .unwrap_or_else(|| builtin_theme("onedark", &builtin(true))),
+                .unwrap_or_else(|| {
+                    let b = builtin_named("onedark").expect("onedark palette exists");
+                    builtin_theme("onedark", &b)
+                }),
         };
         Highlighter {
             syntaxes,

@@ -64,25 +64,25 @@ impl Theme {
             remove: sty("remove", "remove"),
             context: sty("context", "context"),
             header: sty("header", "header bold"),
-            line_number: sty("line_number", "line_number"),
-            add_emph_bg: pal.color("add_emph"),
-            remove_emph_bg: pal.color("remove_emph"),
-            add_line_bg: pal.color("add_line"),
-            remove_line_bg: pal.color("remove_line"),
+            line_number: sty("line-number", "line-number"),
+            add_emph_bg: pal.color("add-emph"),
+            remove_emph_bg: pal.color("remove-emph"),
+            add_line_bg: pal.color("add-line"),
+            remove_line_bg: pal.color("remove-line"),
             cursor_bg: pal.color("cursor").unwrap_or(Color::Indexed(237)),
             statusbar: sty("statusbar", "foreground surface"),
-            statusbar_logo: sty("statusbar_logo", "background primary bold"),
-            statusbar_filename: sty("statusbar_filename", "foreground surface bold"),
-            statusbar_add: sty("statusbar_add", "add surface"),
-            statusbar_remove: sty("statusbar_remove", "remove surface"),
-            statusbar_flags: sty("statusbar_flags", "muted surface"),
-            statusbar_stats: sty("statusbar_stats", "foreground surface"),
-            statusbar_watch: sty("statusbar_watch", "background add bold"),
-            statusbar_help: sty("statusbar_help", "background secondary bold"),
-            help_key: sty("help_key", "muted bold"),
-            help_desc: sty("help_desc", "muted faint"),
+            statusbar_logo: sty("statusbar-logo", "background primary bold"),
+            statusbar_filename: sty("statusbar-filename", "foreground surface bold"),
+            statusbar_add: sty("statusbar-add", "add surface"),
+            statusbar_remove: sty("statusbar-remove", "remove surface"),
+            statusbar_flags: sty("statusbar-flags", "muted surface"),
+            statusbar_stats: sty("statusbar-stats", "foreground surface"),
+            statusbar_watch: sty("statusbar-watch", "background add bold"),
+            statusbar_help: sty("statusbar-help", "background secondary bold"),
+            help_key: sty("help-key", "muted bold"),
+            help_desc: sty("help-desc", "muted faint"),
             dialog: sty("dialog", "foreground background"),
-            dialog_border: sty("dialog_border", "secondary background"),
+            dialog_border: sty("dialog-border", "secondary background"),
         }
     }
 }
@@ -160,7 +160,7 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config, source: Source, opts: crate::git::Opts) -> io::Result<Self> {
-        let highlighter = Arc::new(Highlighter::new(&config.theme, config.syntax));
+        let highlighter = Arc::new(Highlighter::new(&config.theme, config.syntax_enabled()));
         let theme = Theme::from_config(&config);
         // Read input/output from the controlling terminal (/dev/tty) so the
         // TUI works even when a diff is piped in on stdin (pager mode).
@@ -223,7 +223,7 @@ impl App {
         }
         let files = Arc::new(self.files.clone());
         let hl = Arc::clone(&self.highlighter);
-        let intraline = self.config.intraline;
+        let intraline = self.config.intraline_enabled();
         let sel = self.selected;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -365,7 +365,7 @@ impl App {
     /// Flatten a file into styled display rows (syntax + intra-line spans).
     fn build_rows(&self, idx: usize) -> Vec<Row> {
         match self.files.get(idx) {
-            Some(file) => build_file_rows(file, &self.highlighter, self.config.intraline),
+            Some(file) => build_file_rows(file, &self.highlighter, self.config.intraline_enabled()),
             None => Vec::new(),
         }
     }
@@ -1127,7 +1127,7 @@ impl App {
             if text.is_empty() {
                 continue;
             }
-            let mut style = if self.config.syntax {
+            let mut style = if self.config.syntax_enabled() {
                 Style::default().fg(span.fg.or_else(|| base_fg(base)))
             } else {
                 base.clone()
