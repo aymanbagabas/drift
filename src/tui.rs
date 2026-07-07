@@ -341,13 +341,14 @@ impl App {
         let files = Arc::new(self.files.clone());
         let hl = Arc::clone(&self.highlighter);
         let intraline = self.config.intraline_enabled();
+        let tab = self.config.tab_width;
         let sel = self.selected;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let n = files.len();
             let order = std::iter::once(sel).chain((0..n).filter(|&i| i != sel));
             for idx in order {
-                let rows = build_file_rows(&files[idx], &hl, intraline);
+                let rows = build_file_rows(&files[idx], &hl, intraline, tab);
                 if tx.send((idx, rows)).is_err() {
                     return; // receiver dropped (reload/quit): stop early.
                 }
@@ -489,7 +490,12 @@ impl App {
     /// Flatten a file into styled display rows (syntax + intra-line spans).
     fn build_rows(&self, idx: usize) -> Vec<Row> {
         match self.files.get(idx) {
-            Some(file) => build_file_rows(file, &self.highlighter, self.config.intraline_enabled()),
+            Some(file) => build_file_rows(
+                file,
+                &self.highlighter,
+                self.config.intraline_enabled(),
+                self.config.tab_width,
+            ),
             None => Vec::new(),
         }
     }
@@ -1558,13 +1564,43 @@ impl App {
     }
 }
 
+/// Replace tabs with spaces to the next tab stop, tracking column across spans
+/// so indentation lines up. Terminals give `\t` zero width in the grapheme
+/// model, so unexpanded tabs would collapse to nothing on screen.
+// ponytail: tab stops count codepoints, not display width; a tab after a wide
+// char lands one column early. Switch to grapheme width here if that matters.
+fn expand_tabs(spans: &mut [Span], tab: usize) {
+    if tab == 0 {
+        return;
+    }
+    let mut col = 0usize;
+    for span in spans.iter_mut() {
+        if !span.text.contains('\t') {
+            col += span.text.chars().count();
+            continue;
+        }
+        let mut out = String::with_capacity(span.text.len());
+        for ch in span.text.chars() {
+            if ch == '\t' {
+                let n = tab - (col % tab);
+                out.extend(std::iter::repeat(' ').take(n));
+                col += n;
+            } else {
+                out.push(ch);
+                col += 1;
+            }
+        }
+        span.text = out;
+    }
+}
+
 fn base_fg(style: &Style) -> Option<Color> {
     style.fg
 }
 
 /// Flatten a single file diff into styled display rows. Free-standing so it can
 /// run on the startup prefetch thread as well as the lazy main-thread path.
-fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool) -> Vec<Row> {
+fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool, tab: usize) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     if file.is_binary {
         rows.push(Row::new(
@@ -1594,7 +1630,8 @@ fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool) -> Vec<Ro
         let mut fh = hl.file(file.path());
         for line in &hunk.lines {
             let syntax_spans = fh.line(&line.content);
-            let spans = merge(syntax_spans, &line.segments, intraline);
+            let mut spans = merge(syntax_spans, &line.segments, intraline);
+            expand_tabs(&mut spans, tab);
             let kind = match line.kind {
                 LineKind::Add => RowKind::Add,
                 LineKind::Remove => RowKind::Remove,
@@ -1697,7 +1734,7 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit, fit_tail, slice_cells, text_cells, Sel};
+    use super::{expand_tabs, fit, fit_tail, slice_cells, text_cells, Sel, Span};
     use uncurses::text::{grapheme_cells, WidthMode};
 
     // Exercise the same fitting logic clip() uses; clip() itself needs a live
@@ -1708,6 +1745,24 @@ mod tests {
 
     fn sel(a_row: usize, a_col: usize, c_row: usize, c_col: usize) -> Sel {
         Sel { a_row, a_col, c_row, c_col, dragging: false }
+    }
+
+    fn span(text: &str) -> Span {
+        Span { fg: None, changed: false, text: text.into() }
+    }
+
+    #[test]
+    fn expand_tabs_aligns_to_stops_across_spans() {
+        // Leading tab expands to a full stop; a tab mid-column fills to the
+        // next multiple of the tab width, counting columns across span breaks.
+        let mut spans = vec![span("\tif"), span(" x\t{")];
+        expand_tabs(&mut spans, 4);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "    if x    {");
+        // tab=0 disables expansion (tabs left untouched).
+        let mut spans = vec![span("\tx")];
+        expand_tabs(&mut spans, 0);
+        assert_eq!(spans[0].text, "\tx");
     }
 
     #[test]
