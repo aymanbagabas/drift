@@ -259,6 +259,10 @@ pub struct App {
     /// `(box_x0, box_y0, box_x1, box_y1, list_y0, list_h, start)`. Lets a click
     /// map to a file row, and tells inside-the-box clicks from outside ones.
     modal_hit: Option<(u16, u16, u16, u16, u16, usize, usize)>,
+    /// Top-left of the stat modal, once dragged; `None` = auto-centered.
+    modal_pos: Option<(u16, u16)>,
+    /// While dragging the modal: the grab offset into the box `(dx, dy)`.
+    modal_drag: Option<(u16, u16)>,
     /// Last window title pushed to the terminal, to avoid redundant writes.
     title: String,
     /// Whether watch mode reacts to git changes (toggle with `w`).
@@ -322,6 +326,8 @@ impl App {
             help_open: false,
             help_badge_x: 0,
             modal_hit: None,
+            modal_pos: None,
+            modal_drag: None,
             title: String::new(),
             watch: false,
             expand: 0,
@@ -1008,6 +1014,9 @@ impl App {
                                 if idx < self.files.len() {
                                     self.selected = idx;
                                 }
+                            } else {
+                                // Grab the border/summary area to drag the modal.
+                                self.modal_drag = Some((m.x - bx0, m.y - by0));
                             }
                             return Ok(false);
                         }
@@ -1061,7 +1070,9 @@ impl App {
                 // With button tracking (mode 1002) motion is only reported
                 // while a button is held, so any move during a drag extends the
                 // selection.
-                if self.resizing {
+                if let Some((gx, gy)) = self.modal_drag {
+                    self.modal_pos = Some((m.x.saturating_sub(gx), m.y.saturating_sub(gy)));
+                } else if self.resizing {
                     self.resize_sidebar_to(m.x);
                 } else if self.sel.is_some_and(|s| s.dragging) {
                     let body_h = self.viewport_rows() as u16;
@@ -1084,6 +1095,7 @@ impl App {
             Event::MouseRelease(m) => {
                 if m.button == MouseButton::Left {
                     self.resizing = false;
+                    self.modal_drag = None;
                     if let Some(sel) = self.sel.as_mut() {
                         sel.dragging = false;
                         // A click with no drag selects nothing.
@@ -1282,16 +1294,17 @@ impl App {
             self.render_sidebar(sx, sw, body_h);
         }
 
-        if self.view == View::Stat {
-            self.render_stat_modal();
-        }
-
         // Footer bar sits just above the help grid (when the grid is open the
         // footer is "pushed up" to make room below it).
         let footer_row = body_h;
         self.render_footer(footer_row);
         if self.help_open {
             self.render_help_grid(footer_row + 1, h);
+        }
+        // The stat modal floats above everything, footer and help included, so
+        // it must be drawn last.
+        if self.view == View::Stat {
+            self.render_stat_modal();
         }
         // Overlay the selection highlight on top of the finished frame.
         if let Some(sel) = self.sel {
@@ -1421,8 +1434,11 @@ impl App {
         let h = self.screen.height();
         let bw = (inner_w + 2).min(w);
         let bh = (inner_h + 2).min(h);
-        let x0 = (w - bw) / 2;
-        let y0 = (h - bh) / 2;
+        // Follow the dragged position (clamped on-screen), else center.
+        let (x0, y0) = match self.modal_pos {
+            Some((px, py)) => (px.min(w - bw), py.min(h - bh)),
+            None => ((w - bw) / 2, (h - bh) / 2),
+        };
         // Rounded borders and interior share the dialog surface so the dialog
         // reads as one clean panel.
         let border = self.theme.dialog_border.clone();
@@ -1516,7 +1532,13 @@ impl App {
             .clamp(10, (w as usize).saturating_sub(24));
         let count_w = 5usize;
         let bar_w = 24usize.min((w as usize).saturating_sub(name_w + count_w + 8));
-        let inner_w = (name_w + count_w + bar_w + 5) as u16;
+        // The summary line can be wider than the file rows; size the box to the
+        // larger of the two so it never gets clipped.
+        let summary = format!("{nf} files changed, {add} insertion(s)(+), {del} deletion(s)(-)");
+        let list_w = name_w + count_w + bar_w + 5;
+        let inner_w = list_w
+            .max(self.width(&summary) as usize)
+            .min((w as usize).saturating_sub(2)) as u16;
         // Rows: one per file (capped to fit) + a blank + summary line.
         let max_rows = (h.saturating_sub(6)) as usize;
         let list_h = self.files.len().min(max_rows.max(1));
@@ -1564,26 +1586,25 @@ impl App {
             let pad = (name_w as u16).saturating_sub(self.width(&name)) as usize;
             self.screen
                 .set_str((ix, y), &format!("{marker}{name}{}", " ".repeat(pad)), name_style);
-            let count = format!(" {:>count_w$} ", a + d);
-            let cx = ix + 2 + name_w as u16;
-            self.screen.set_str((cx, y), &count, on_bg.clone());
-            let bx = cx + self.width(&count);
             let scaled = |n: usize| if n == 0 { 0 } else { ((n * bar_w) / max_count).max(1) };
             let ap = scaled(a);
             let dp = scaled(d).min(bar_w.saturating_sub(ap));
+            // Right cluster: the count column then the +/- bar, both flush to the
+            // box's right edge. Names stay left; the gap floats in the middle.
+            let count = format!("{:>count_w$}", a + d);
+            let cx = ix + inner_w - bar_w as u16 - 1 - count_w as u16;
+            self.screen.set_str((cx, y), &count, on_bg.clone());
+            let bstart = ix + inner_w - (ap + dp) as u16;
             self.screen
-                .set_str((bx, y), &"+".repeat(ap), on_bg.clone().fg(base_fg(&self.theme.add)));
+                .set_str((bstart, y), &"+".repeat(ap), on_bg.clone().fg(base_fg(&self.theme.add)));
             self.screen.set_str(
-                (bx + ap as u16, y),
+                (bstart + ap as u16, y),
                 &"-".repeat(dp),
                 on_bg.clone().fg(base_fg(&self.theme.remove)),
             );
         }
 
-        // Summary line.
-        let summary = format!(
-            "{nf} files changed, {add} insertion(s)(+), {del} deletion(s)(-)",
-        );
+        // Summary line (already sized into inner_w above).
         self.screen.set_str(
             (ix, iy + inner_h - 1),
             &self.clip(&summary, inner_w).0,
