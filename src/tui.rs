@@ -1816,7 +1816,7 @@ impl App {
                     self.draw_diff_row(r, right_x, right_w, y, rbg, Gut::New);
                 }
             }
-            let mut dv = self.theme.line_number.clone();
+            let mut dv = self.theme.sidebar_border.clone();
             if let Some(c) = cbg {
                 dv = dv.bg(c);
             }
