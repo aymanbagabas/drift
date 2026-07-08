@@ -248,10 +248,14 @@ pub struct App {
     sidebar_width: Option<usize>,
     /// True while dragging the sidebar divider to resize it.
     resizing: bool,
+    /// True while dragging the split-view divider to resize the two panes.
+    resizing_split: bool,
     /// Last body left-click (time, x, y) for double-click detection.
     last_click: Option<(Instant, u16, u16)>,
     /// Side-by-side (split) diff rendering, toggled with `s`.
     split: bool,
+    /// Left pane's fraction of the split body (drag the divider to change it).
+    split_ratio: f32,
     help_open: bool,
     /// Screen x where the "? help" footer badge starts, for click-to-toggle.
     help_badge_x: u16,
@@ -321,8 +325,10 @@ impl App {
             sidebar: None,
             sidebar_width: None,
             resizing: false,
+            resizing_split: false,
             last_click: None,
             split: false,
+            split_ratio: 0.5,
             help_open: false,
             help_badge_x: 0,
             modal_hit: None,
@@ -654,6 +660,34 @@ impl App {
         };
         let max = (w / 2).max(2);
         self.sidebar_width = Some((width as usize).clamp(8, max as usize));
+    }
+
+    /// Left pane width (cells) of a split body of total `width`, honoring the
+    /// drag ratio and leaving at least 2 cells on each side of the divider.
+    fn split_left_w(&self, width: u16) -> u16 {
+        let inner = width.saturating_sub(1);
+        ((inner as f32 * self.split_ratio).round() as u16).clamp(2, inner.saturating_sub(2))
+    }
+
+    /// Screen column of the split divider, for click-to-drag hit testing.
+    fn split_div_x(&self) -> u16 {
+        let bw = self.screen.width().saturating_sub(self.sidebar_w());
+        self.body_x() + self.split_left_w(bw)
+    }
+
+    /// Resize the split so its divider follows screen column `x`.
+    fn resize_split_to(&mut self, x: u16) {
+        let bx = self.body_x();
+        let inner = self
+            .screen
+            .width()
+            .saturating_sub(self.sidebar_w())
+            .saturating_sub(1);
+        if inner < 4 {
+            return;
+        }
+        let left = x.saturating_sub(bx).clamp(2, inner - 2);
+        self.split_ratio = left as f32 / inner as f32;
     }
 
     /// True when the sidebar sits on the left (default), false for the right.
@@ -1031,6 +1065,9 @@ impl App {
                     } else if self.sidebar_w() > 0 && m.x == self.divider_x() {
                         // Grab the divider to resize the sidebar.
                         self.resizing = true;
+                    } else if self.split && m.x == self.split_div_x() {
+                        // Grab the split divider to resize the two panes.
+                        self.resizing_split = true;
                     } else if self.in_sidebar(m.x) {
                         // Click a file in the sidebar.
                         let idx = self.file_window(body_h as usize) + m.y as usize;
@@ -1074,6 +1111,8 @@ impl App {
                     self.modal_pos = Some((m.x.saturating_sub(gx), m.y.saturating_sub(gy)));
                 } else if self.resizing {
                     self.resize_sidebar_to(m.x);
+                } else if self.resizing_split {
+                    self.resize_split_to(m.x);
                 } else if self.sel.is_some_and(|s| s.dragging) {
                     let body_h = self.viewport_rows() as u16;
                     // Dragging past the top/bottom edge scrolls, so a selection
@@ -1095,6 +1134,7 @@ impl App {
             Event::MouseRelease(m) => {
                 if m.button == MouseButton::Left {
                     self.resizing = false;
+                    self.resizing_split = false;
                     self.modal_drag = None;
                     if let Some(sel) = self.sel.as_mut() {
                         sel.dragging = false;
@@ -1652,7 +1692,7 @@ impl App {
         if width < 5 {
             return self.render_diff(x, width, body_h);
         }
-        let left_w = (width - 1) / 2;
+        let left_w = self.split_left_w(width);
         let div_x = x + left_w;
         let right_x = div_x + 1;
         let right_w = width - left_w - 1;
