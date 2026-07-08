@@ -28,6 +28,7 @@ surface     = "brightblack"  # status bar / chip background
 cursor      = "brightblack"  # current-line highlight
 add-line    = "default"      # keep terminal bg; emphasis carries the change
 remove-line = "default"
+header-line = "brightblack"  # spanning band behind a hunk header
 add-emph    = "green"
 remove-emph = "red"
 

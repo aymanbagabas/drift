@@ -28,6 +28,7 @@ surface     = "#eee8d5"  # status bar / chip background
 cursor      = "#ddd6c1"  # current-line highlight
 add-line    = "#e3e2b1"  # whole-line wash for added lines
 remove-line = "#f6cbbb"  # whole-line wash for removed lines
+header-line = "#dae6ec"  # spanning band behind a hunk header
 add-emph    = "#cbcf84"  # intra-line changed-word background (added)
 remove-emph = "#efa497"  # intra-line changed-word background (removed)
 

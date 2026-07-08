@@ -65,6 +65,8 @@ pub struct Colors {
     /// Subtle whole-line background for added/removed lines.
     pub add_line: String,
     pub remove_line: String,
+    /// Spanning background band behind a hunk header (section separator).
+    pub header_line: String,
     /// Background emphasis for intra-line changed segments.
     pub add_emph: String,
     pub remove_emph: String,
@@ -108,6 +110,7 @@ impl Default for Colors {
             cursor: String::new(),
             add_line: String::new(),
             remove_line: String::new(),
+            header_line: String::new(),
             add_emph: String::new(),
             remove_emph: String::new(),
         }
@@ -158,6 +161,7 @@ impl Config {
         fill(&mut c.cursor, b.cursor);
         fill(&mut c.add_line, b.add_line);
         fill(&mut c.remove_line, b.remove_line);
+        fill(&mut c.header_line, b.header_line);
         fill(&mut c.add_emph, b.add_emph);
         fill(&mut c.remove_emph, b.remove_emph);
     }
@@ -224,6 +228,7 @@ impl Config {
             "remove-emph" => &mut c.remove_emph,
             "add-line" => &mut c.add_line,
             "remove-line" => &mut c.remove_line,
+            "header-line" => &mut c.header_line,
             _ => return,
         };
         *slot = val.to_string();
@@ -326,6 +331,7 @@ pub struct Builtin {
     pub cursor: &'static str,
     pub add_line: &'static str,
     pub remove_line: &'static str,
+    pub header_line: &'static str,
     pub add_emph: &'static str,
     pub remove_emph: &'static str,
 }
@@ -351,6 +357,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#3e4451",
             add_line: "#2b3a2e",
             remove_line: "#3f2d30",
+            header_line: "#2c3543",
             add_emph: "#3d5943",
             remove_emph: "#6d3b40",
         }),
@@ -369,6 +376,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#cdd1d8",
             add_line: "#e6f3e6",
             remove_line: "#fbe9e8",
+            header_line: "#e3ebfb",
             add_emph: "#cdead0",
             remove_emph: "#f7d3d0",
         }),
@@ -387,6 +395,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "brightblack",
             add_line: "default",
             remove_line: "default",
+            header_line: "brightblack",
             add_emph: "green",
             remove_emph: "red",
         }),
@@ -405,6 +414,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#4d5066",
             add_line: "#2e4b41",
             remove_line: "#4a313b",
+            header_line: "#2f3a4c",
             add_emph: "#36714d",
             remove_emph: "#713941",
         }),
@@ -423,6 +433,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#504945",
             add_line: "#3f4028",
             remove_line: "#4a2d2a",
+            header_line: "#2f3a3a",
             add_emph: "#595a27",
             remove_emph: "#70332c",
         }),
@@ -441,6 +452,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#d5c4a1",
             add_line: "#ded69e",
             remove_line: "#e6bc9d",
+            header_line: "#d3e0dc",
             add_emph: "#c4bc79",
             remove_emph: "#d48c76",
         }),
@@ -459,6 +471,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#434c5e",
             add_line: "#414a4c",
             remove_line: "#453b47",
+            header_line: "#333f50",
             add_emph: "#56635a",
             remove_emph: "#5f434e",
         }),
@@ -477,6 +490,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#094e5e",
             add_line: "#153d2d",
             remove_line: "#232c35",
+            header_line: "#0a3a4a",
             add_emph: "#2d5024",
             remove_emph: "#4b2d34",
         }),
@@ -495,6 +509,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#ddd6c1",
             add_line: "#e3e2b1",
             remove_line: "#f6cbbb",
+            header_line: "#dae6ec",
             add_emph: "#cbcf84",
             remove_emph: "#efa497",
         }),
@@ -513,6 +528,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#45475a",
             add_line: "#343e40",
             remove_line: "#402f42",
+            header_line: "#2a3048",
             add_emph: "#4c6155",
             remove_emph: "#664357",
         }),
@@ -531,6 +547,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#bcc0cc",
             add_line: "#c8dfc9",
             remove_line: "#e9bfcc",
+            header_line: "#d5def6",
             add_emph: "#a6cfa0",
             remove_emph: "#e392a6",
         }),
@@ -549,6 +566,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#292e42",
             add_line: "#2f3831",
             remove_line: "#3d2a37",
+            header_line: "#222c48",
             add_emph: "#47583d",
             remove_emph: "#653a49",
         }),
@@ -567,6 +585,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             cursor: "#49483e",
             add_line: "#3b4624",
             remove_line: "#49282f",
+            header_line: "#2c3b40",
             add_emph: "#526726",
             remove_emph: "#6e273d",
         }),
@@ -637,6 +656,7 @@ impl Palette {
             ("cursor", parse_color(&c.cursor)),
             ("add-line", parse_color(&c.add_line)),
             ("remove-line", parse_color(&c.remove_line)),
+            ("header-line", parse_color(&c.header_line)),
             ("add-emph", parse_color(&c.add_emph)),
             ("remove-emph", parse_color(&c.remove_emph)),
         ]);

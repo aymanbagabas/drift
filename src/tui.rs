@@ -37,6 +37,9 @@ struct Theme {
     remove_emph_bg: Option<Color>,
     add_line_bg: Option<Color>,
     remove_line_bg: Option<Color>,
+    /// Spanning background band behind a hunk header, so it reads as a section
+    /// separator; a subtle blue-tinted tone distinct from added/removed washes.
+    header_bg: Option<Color>,
     cursor_bg: Color,
     // Terminal default background (OSC 11); `None` rides the terminal's own.
     background: Option<Color>,
@@ -77,6 +80,7 @@ impl Theme {
             remove_emph_bg: pal.color("remove-emph"),
             add_line_bg: pal.color("add-line"),
             remove_line_bg: pal.color("remove-line"),
+            header_bg: pal.color("header-line"),
             cursor_bg: pal.color("cursor").unwrap_or(Color::Indexed(237)),
             background: pal.color("background"),
             statusbar: sty("statusbar", "foreground surface"),
@@ -1674,6 +1678,7 @@ impl App {
                 match r.kind {
                     RowKind::Add => self.theme.add_line_bg,
                     RowKind::Remove => self.theme.remove_line_bg,
+                    RowKind::Hunk => self.theme.header_bg,
                     _ => None,
                 }
             };
@@ -1713,7 +1718,12 @@ impl App {
                 None
             };
             match r.kind {
-                RowKind::Hunk | RowKind::Note => {
+                RowKind::Hunk => {
+                    let hbg = cbg.or(self.theme.header_bg);
+                    self.draw_diff_row(r, x, width, y, hbg, Gut::Both);
+                    continue;
+                }
+                RowKind::Note => {
                     self.draw_diff_row(r, x, width, y, cbg, Gut::Both);
                     continue;
                 }
@@ -1800,7 +1810,7 @@ impl App {
             RowKind::Hunk => {
                 let (s, _) = self.clip(&r.spans[0].text, width);
                 self.screen
-                    .set_str((cx, y), &s, bg(self.theme.header.clone().faint()));
+                    .set_str((cx, y), &s, bg(self.theme.header.clone()));
                 return;
             }
             RowKind::Note => {
