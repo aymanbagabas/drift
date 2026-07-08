@@ -1816,7 +1816,7 @@ impl App {
 
     /// Display width of `s` in terminal columns under the screen's width mode.
     fn width(&self, s: &str) -> u16 {
-        self.screen.grapheme_cells(s).map(|(_, w)| w as u16).sum()
+        self.screen.str_width(s)
     }
 
     /// Shorten `s` to at most `width` display columns, keeping the tail (e.g. a
