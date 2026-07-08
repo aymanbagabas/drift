@@ -1009,9 +1009,9 @@ impl App {
                     } else if k.matches_any(["k", "up", "left"]) {
                         self.select_file(-1);
                     } else if k.matches_any(["g", "home"]) {
-                        self.selected = 0;
+                        self.select_file_at(0);
                     } else if k.matches_any(["G", "end"]) {
-                        self.selected = self.files.len().saturating_sub(1);
+                        self.select_file_at(self.files.len().saturating_sub(1));
                     } else if k.matches_any(["f", "tab"]) {
                         self.view = View::Diff;
                     } else if k.matches("?") {
@@ -1109,7 +1109,7 @@ impl App {
                             if m.y >= ly0 && m.y < ly0 + list_h as u16 {
                                 let idx = start + (m.y - ly0) as usize;
                                 if idx < self.files.len() {
-                                    self.selected = idx;
+                                    self.select_file_at(idx);
                                 }
                             } else {
                                 // Grab the border/summary area to drag the modal.
