@@ -1,0 +1,46 @@
+#!/usr/bin/env sh
+# diffv-pick: browse the git log, pick a commit, open it in diffv, repeat.
+#
+# Uses fzf (fuzzy search + preview) when it's on your PATH, and falls back to a
+# plain numbered menu so it works with git alone. Picking a commit opens it in
+# diffv; quitting diffv drops you back at the list. Cancelling the picker
+# (Esc/Ctrl-C in fzf, or an empty line in the menu) exits without opening diffv.
+#
+# Any extra arguments are passed straight through to `git log`, e.g.:
+#   diffv-pick --author=you           only your commits
+#   diffv-pick -- src/                touching src/
+set -eu
+
+pick_fzf() {
+	git log --color=always --format='%C(auto)%h %s' "$@" |
+		fzf --ansi --no-sort --height=80% --reverse \
+			--preview 'git show --stat --color=always {1}' |
+		awk '{print $1}'
+}
+
+pick_menu() {
+	# Numbered list of recent commits; prompts on stderr so stdout stays the
+	# chosen hash. Empty or non-numeric input cancels.
+	list=$(git log --oneline -30 "$@")
+	printf '%s\n' "$list" | nl -w2 -s'  ' >&2
+	printf 'commit # (enter to quit): ' >&2
+	read -r n || return 0
+	case "$n" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	printf '%s\n' "$list" | sed -n "${n}p" | awk '{print $1}'
+}
+
+if command -v fzf >/dev/null 2>&1; then
+	pick() { pick_fzf "$@"; }
+else
+	pick() { pick_menu "$@"; }
+fi
+
+while :; do
+	# A cancelled picker exits non-zero (fzf) or returns empty (menu); either
+	# way we stop instead of opening diffv on nothing.
+	commit=$(pick "$@") || exit 0
+	[ -n "$commit" ] || exit 0
+	diffv "$commit"
+done
