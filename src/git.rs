@@ -25,6 +25,9 @@ pub struct Opts {
     pub context: Option<usize>,
     pub algorithm: Option<String>,
     pub pathspec: Vec<String>,
+    /// Also show untracked (non-ignored) files, each diffed against an empty
+    /// blob. Only meaningful for the worktree source.
+    pub all: bool,
 }
 
 impl Opts {
@@ -142,7 +145,13 @@ impl Source {
             let err = String::from_utf8_lossy(&out.stderr);
             return Err(std::io::Error::other(format!("git failed: {}", err.trim())));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        // `-A` on the worktree also surfaces untracked files, which plain
+        // `git diff` omits. Append them as new-file diffs.
+        if opts.all && matches!(self, Source::Worktree) {
+            text.push_str(&untracked_diff(opts)?);
+        }
+        Ok(text)
     }
 
     /// Whether this source reflects unstaged working-tree edits, which touch
@@ -150,5 +159,85 @@ impl Source {
     /// Only these need the polling fallback in watch mode.
     pub fn reads_worktree(&self) -> bool {
         matches!(self, Source::Worktree)
+    }
+}
+
+/// Diff every untracked, non-ignored file against an empty input so `-A`
+/// shows brand-new files that plain `git diff` skips. Honors the same
+/// pathspec and render flags as the main diff. `--no-index` exits non-zero
+/// when it finds differences (always, here), so its status is ignored.
+// ponytail: uses /dev/null (POSIX); a Windows port would need "NUL".
+fn untracked_diff(opts: &Opts) -> std::io::Result<String> {
+    let mut ls: Vec<String> = ["ls-files", "--others", "--exclude-standard", "-z"]
+        .map(String::from)
+        .into();
+    if !opts.pathspec.is_empty() {
+        ls.push("--".into());
+        ls.extend(opts.pathspec.iter().cloned());
+    }
+    let listed = git(&ls.iter().map(String::as_str).collect::<Vec<_>>())?;
+    if !listed.status.success() {
+        return Ok(String::new());
+    }
+    let names = String::from_utf8_lossy(&listed.stdout);
+    let mut text = String::new();
+    for file in names.split('\0').filter(|s| !s.is_empty()) {
+        let mut a: Vec<String> = [
+            "-c",
+            "diff.mnemonicPrefix=false",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-index",
+        ]
+        .map(String::from)
+        .into();
+        a.extend(opts.flags());
+        a.push("/dev/null".into());
+        a.push(file.to_string());
+        let out = Command::new("git").args(&a).output()?;
+        text.push_str(&String::from_utf8_lossy(&out.stdout));
+    }
+    Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `-A` surfaces an untracked file as a new-file diff with clean `a/ b/`
+    /// prefixes, on top of the tracked change.
+    #[test]
+    fn all_includes_untracked() {
+        let dir = std::env::temp_dir().join(format!("diffv-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(["-C", dir.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.co"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("tracked.txt"), "one\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "init"]);
+        std::fs::write(dir.join("tracked.txt"), "two\n").unwrap();
+        std::fs::write(dir.join("fresh.txt"), "brand new\n").unwrap();
+
+        let opts = Opts { all: true, ..Default::default() };
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let text = Source::Worktree.diff(&opts);
+        std::env::set_current_dir(prev).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let text = text.unwrap();
+        assert!(text.contains("b/tracked.txt"), "tracked change missing:\n{text}");
+        assert!(text.contains("b/fresh.txt"), "untracked file missing:\n{text}");
+        assert!(text.contains("new file"), "no new-file header:\n{text}");
     }
 }

@@ -28,6 +28,11 @@ struct Cli {
     #[arg(long, visible_alias = "cached")]
     staged: bool,
 
+    /// Also show untracked (non-ignored) files as new-file diffs. Only affects
+    /// the working-tree view.
+    #[arg(short = 'A', long = "all")]
+    all: bool,
+
     /// Watch the git index and refs and refresh the diff on change.
     #[arg(short, long)]
     watch: bool,
@@ -115,6 +120,7 @@ fn run() -> std::io::Result<()> {
         context: cli.context,
         algorithm: cli.diff_algorithm.clone(),
         pathspec: cli.pathspec.clone(),
+        all: cli.all,
     };
 
     // Everything but Stdin needs a repository.

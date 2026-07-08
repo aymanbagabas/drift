@@ -23,6 +23,7 @@ That drops a `diffv` binary on your `PATH`.
 
 ```sh
 diffv                     # working tree vs HEAD
+diffv -A                  # ...and untracked files too
 diffv --staged            # what's staged (alias: --cached)
 diffv HEAD~3              # a single commit
 diffv main..feature       # a range
@@ -43,6 +44,7 @@ Some flags worth knowing:
 | Flag | What it does |
 |------|--------------|
 | `-w`, `--watch` | Refresh when the git index or refs change |
+| `-A`, `--all` | Also show untracked files (working-tree view only) |
 | `-C`, `--directory DIR` | Run as if started in `DIR` (worktrees, bare repos) |
 | `-c`, `--config FILE` | Use a specific config file |
 | `--no-syntax` | Turn off syntax highlighting for this run |
