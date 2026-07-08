@@ -89,8 +89,10 @@ pub fn totals(files: &[FileDiff]) -> (usize, usize, usize) {
 }
 
 fn strip_prefix(p: &str) -> String {
-    // Strip the a/ or b/ prefix git adds; leave /dev/null alone.
-    for pre in ["a/", "b/"] {
+    // Strip the prefix git adds before a path. Default is a/ or b/, but with
+    // diff.mnemonicPrefix git uses i/ (index), w/ (worktree), c/ (commit), or
+    // o/ (object) instead. Leave /dev/null and unprefixed paths alone.
+    for pre in ["a/", "b/", "i/", "w/", "c/", "o/"] {
         if let Some(rest) = p.strip_prefix(pre) {
             return rest.to_string();
         }
@@ -225,10 +227,14 @@ pub fn parse(input: &str) -> Vec<FileDiff> {
 
 fn parse_diff_header(line: &str) -> Option<(String, String)> {
     let rest = line.strip_prefix("diff --git ")?;
-    if let Some(idx) = rest.find(" b/") {
-        let a = &rest[..idx];
-        let b = &rest[idx + 1..];
-        return Some((strip_prefix(a.trim()), strip_prefix(b.trim())));
+    // Split the two paths at the second path's prefix. Default is " b/", but
+    // diff.mnemonicPrefix uses " w/" or " i/" for the after-side.
+    for sep in [" b/", " w/", " i/", " c/", " o/"] {
+        if let Some(idx) = rest.find(sep) {
+            let a = &rest[..idx];
+            let b = &rest[idx + 1..];
+            return Some((strip_prefix(a.trim()), strip_prefix(b.trim())));
+        }
     }
     let mut it = rest.split_whitespace();
     Some((strip_prefix(it.next()?), strip_prefix(it.next()?)))
@@ -369,6 +375,23 @@ index 1234567..89abcde 100644\n\
         assert_eq!(lines[0].new_no, Some(1));
         assert_eq!(lines[2].new_no, Some(2));
         assert_eq!(lines[3].old_no, Some(3));
+    }
+
+    #[test]
+    fn strips_mnemonic_prefixes() {
+        // diff.mnemonicPrefix=true emits c/ (commit) and w/ (worktree) instead
+        // of a/ b/. Both the header split and the ---/+++ lines must resolve to
+        // the real path so display and open work.
+        let diff = "diff --git c/src/main.rs w/src/main.rs\n\
+index e69de29..0cfbf08 100644\n\
+--- c/src/main.rs\n\
++++ w/src/main.rs\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n";
+        let files = parse(diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), "src/main.rs");
     }
 
     #[test]

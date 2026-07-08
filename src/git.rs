@@ -106,6 +106,10 @@ impl Source {
             "core.pager=cat".into(),
             "-c".into(),
             "color.diff=never".into(),
+            // Keep the plain a/ b/ path prefixes; diff.mnemonicPrefix would
+            // emit i/ w/ c/ o/ instead, which breaks path display and open.
+            "-c".into(),
+            "diff.mnemonicPrefix=false".into(),
         ];
         match self {
             Source::Stdin => unreachable!(),
