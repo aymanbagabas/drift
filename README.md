@@ -3,10 +3,11 @@
 A git diff pager that actually wants to be looked at.
 
 `diffv` takes the diff you already know and drops it into a real terminal UI:
-syntax highlighting, word-level change emphasis, split or unified views, a file
-list, jump-to-hunk, open-in-`$EDITOR`, and a live mode that repaints the moment
-your index or branch moves. Point it at a commit, your staging area, or your
-working tree, or just pipe a diff into it like any other pager.
+syntax highlighting, word-level change emphasis, split or unified views, a
+file-list modal and a live sidebar you can click and drag to resize,
+jump-to-hunk, open-in-`$EDITOR`, and a live mode that repaints the moment your
+index or branch moves. Point it at a commit, your staging area, or your working
+tree, or just pipe a diff into it like any other pager.
 
 No config needed to start. Themes, colors, and keys are all yours to bend later.
 
@@ -60,13 +61,29 @@ Some flags worth knowing:
 | `{` `}` | Previous / next hunk |
 | `n` `p` / `←` `→` / `tab` | Previous / next file |
 | `s` | Toggle split view |
-| `f` | File list |
+| `f` | File list modal |
+| `b` | Toggle the file sidebar |
 | `w` | Toggle watch mode |
+| `y` | Copy the selection, or the cursor line when nothing is selected |
+| `Y` | Copy the whole current file |
 | `enter` | Expand folded context, or open the file at the cursor |
 | `e` | Open the current file in `$EDITOR` |
 | `r` | Refresh |
 | `?` | Toggle the help footer |
 | `q` | Quit |
+
+## Mouse
+
+diffv is fully mouse-driven too:
+
+- Click a file in the sidebar to jump straight to it in the diff.
+- Click a file in the file modal to select it; the modal stays open until you
+  click outside it (or press `enter`).
+- Drag the sidebar's divider to resize it, live.
+- Click the `? help` badge in the status bar to toggle the help footer.
+- Drag across the diff to select text; it lands on your system clipboard (over
+  SSH too, via OSC 52).
+- Scroll wheel moves through the diff.
 
 ## Themes
 
@@ -107,12 +124,15 @@ diffv looks for a config file, in order, at:
 TOML, YAML, and JSON all work. The top-level knobs:
 
 ```toml
-theme        = "onedark"   # any built-in or syntect theme name
-syntax       = true        # highlight diff content
-intraline    = true        # word-level change emphasis
-line-numbers = true        # old/new line-number gutter
-tab-width    = 4
-editor       = ""          # falls back to $VISUAL, then $EDITOR, then vi
+theme         = "onedark"   # any built-in or syntect theme name
+syntax        = true        # highlight diff content
+intraline     = true        # word-level change emphasis
+line-numbers  = true        # old/new line-number gutter
+tab-width     = 4
+editor        = ""          # falls back to $VISUAL, then $EDITOR, then vi
+sidebar       = "auto"      # "auto" (opens at width >= 150), "always", or "never"
+sidebar-width = 30          # sidebar columns; drag its divider to resize live
+sidebar-side  = "left"      # "left" or "right"
 ```
 
 Colors come in two layers. `[colors]` is a named palette; `[styles]` maps UI

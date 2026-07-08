@@ -21,6 +21,14 @@ pub struct Config {
     pub line_numbers: bool,
     /// Spaces per tab when rendering.
     pub tab_width: usize,
+    /// Sidebar visibility: "auto" (open when terminal >= 150 wide, default),
+    /// "always" (open), or "never" (closed). The `b` key overrides at runtime.
+    pub sidebar: String,
+    /// Width in cells of the file-list sidebar (including its divider). A mouse
+    /// drag on the divider overrides this at runtime.
+    pub sidebar_width: usize,
+    /// Which side the sidebar sits on: "left" (default) or "right".
+    pub sidebar_side: String,
     /// Editor command; falls back to $EDITOR / $VISUAL when empty.
     pub editor: String,
     pub colors: Colors,
@@ -70,6 +78,9 @@ impl Default for Config {
             intraline: true,
             line_numbers: true,
             tab_width: 4,
+            sidebar: "auto".to_string(),
+            sidebar_width: 30,
+            sidebar_side: "left".to_string(),
             editor: String::new(),
             colors: Colors::default(),
             styles: HashMap::new(),
@@ -181,6 +192,11 @@ impl Config {
                     "intraline" => self.intraline = parse_bool(val, self.intraline),
                     "line-numbers" => self.line_numbers = parse_bool(val, self.line_numbers),
                     "tab-width" => self.tab_width = val.parse().unwrap_or(self.tab_width),
+                    "sidebar" => self.sidebar = val.to_string(),
+                    "sidebar-width" => {
+                        self.sidebar_width = val.parse().unwrap_or(self.sidebar_width)
+                    }
+                    "sidebar-side" => self.sidebar_side = val.to_string(),
                     "editor" => self.editor = val.to_string(),
                     _ => {}
                 }

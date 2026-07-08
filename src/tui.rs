@@ -56,6 +56,8 @@ struct Theme {
     // Dialogs.
     dialog: Style,
     dialog_border: Style,
+    // Sidebar.
+    sidebar_border: Style,
 }
 
 impl Theme {
@@ -89,7 +91,8 @@ impl Theme {
             help_key: sty("help-key", "muted bold"),
             help_desc: sty("help-desc", "muted faint"),
             dialog: sty("dialog", "foreground background"),
-            dialog_border: sty("dialog-border", "secondary background"),
+            dialog_border: sty("dialog-border", "surface"),
+            sidebar_border: sty("sidebar-border", "surface"),
         }
     }
 }
@@ -237,9 +240,25 @@ pub struct App {
     /// Selected/highlighted row within the diff (tig-style cursor line).
     cursor: usize,
     view: View,
+    /// Left file-list sidebar override: `None` follows the auto rule (open when
+    /// the terminal is >= 150 cells wide), `Some(_)` is the user's toggle.
+    sidebar: Option<bool>,
+    /// Runtime sidebar width override (cells) from a mouse-drag resize; `None`
+    /// follows `config.sidebar_width`.
+    sidebar_width: Option<usize>,
+    /// True while dragging the sidebar divider to resize it.
+    resizing: bool,
+    /// Last body left-click (time, x, y) for double-click detection.
+    last_click: Option<(Instant, u16, u16)>,
     /// Side-by-side (split) diff rendering, toggled with `s`.
     split: bool,
     help_open: bool,
+    /// Screen x where the "? help" footer badge starts, for click-to-toggle.
+    help_badge_x: u16,
+    /// Clickable geometry of the stat modal from the last render:
+    /// `(box_x0, box_y0, box_x1, box_y1, list_y0, list_h, start)`. Lets a click
+    /// map to a file row, and tells inside-the-box clicks from outside ones.
+    modal_hit: Option<(u16, u16, u16, u16, u16, usize, usize)>,
     /// Last window title pushed to the terminal, to avoid redundant writes.
     title: String,
     /// Whether watch mode reacts to git changes (toggle with `w`).
@@ -295,8 +314,14 @@ impl App {
             scroll: 0,
             cursor: 0,
             view: View::Diff,
+            sidebar: None,
+            sidebar_width: None,
+            resizing: false,
+            last_click: None,
             split: false,
             help_open: false,
+            help_badge_x: 0,
+            modal_hit: None,
             title: String::new(),
             watch: false,
             expand: 0,
@@ -525,10 +550,11 @@ impl App {
             ("tab", "cycle files"),
             ("s", "split view"),
             ("f", "files"),
+            ("b", "sidebar"),
             ("w", "watch on/off"),
             ("enter", "expand context"),
             ("e", "edit in $EDITOR"),
-            ("y", "copy selection"),
+            ("y", "copy line/selection"),
             ("Y", "copy file diff"),
             ("r", "refresh"),
             ("?", "toggle help"),
@@ -574,6 +600,87 @@ impl App {
                 Gut::Old | Gut::New => 5,
             }
         }
+    }
+
+    /// Whether the file-list sidebar is showing: the user's runtime toggle
+    /// wins, otherwise the `sidebar` config mode decides ("always", "never", or
+    /// "auto" = open on terminals at least 150 cells wide, roomy enough to keep
+    /// the diff body comfortable next to a 30-cell sidebar).
+    fn sidebar_visible(&self) -> bool {
+        if self.files.is_empty() {
+            return false;
+        }
+        self.sidebar.unwrap_or_else(|| match self.config.sidebar.as_str() {
+            "always" | "on" | "open" => true,
+            "never" | "off" | "closed" => false,
+            _ => self.screen.width() >= 150,
+        })
+    }
+
+    /// Sidebar width in cells (including its 1-cell divider), 0 when hidden.
+    /// Clamped so it never eats more than half the terminal.
+    fn sidebar_w(&self) -> u16 {
+        if !self.sidebar_visible() {
+            return 0;
+        }
+        let max = (self.screen.width() / 2).max(2);
+        let want = self.sidebar_width.unwrap_or(self.config.sidebar_width);
+        (want as u16).clamp(8, max)
+    }
+
+    /// Screen column of the sidebar's resize divider (the edge facing the body).
+    fn divider_x(&self) -> u16 {
+        let sw = self.sidebar_w();
+        if self.sidebar_left() {
+            sw.saturating_sub(1)
+        } else {
+            self.screen.width().saturating_sub(sw)
+        }
+    }
+
+    /// Resize the sidebar so its divider follows screen column `x`.
+    fn resize_sidebar_to(&mut self, x: u16) {
+        let w = self.screen.width();
+        let width = if self.sidebar_left() {
+            x + 1
+        } else {
+            w.saturating_sub(x)
+        };
+        let max = (w / 2).max(2);
+        self.sidebar_width = Some((width as usize).clamp(8, max as usize));
+    }
+
+    /// True when the sidebar sits on the left (default), false for the right.
+    fn sidebar_left(&self) -> bool {
+        self.config.sidebar_side != "right"
+    }
+
+    /// Screen x where the diff body begins (right of a left sidebar).
+    fn body_x(&self) -> u16 {
+        if self.sidebar_left() {
+            self.sidebar_w()
+        } else {
+            0
+        }
+    }
+
+    /// True when screen column `x` falls inside the sidebar (either side).
+    fn in_sidebar(&self, x: u16) -> bool {
+        let sw = self.sidebar_w();
+        if sw == 0 {
+            return false;
+        }
+        if self.sidebar_left() {
+            x < sw
+        } else {
+            x >= self.screen.width().saturating_sub(sw)
+        }
+    }
+
+    /// Scroll offset of a file list `list_h` rows tall, keeping `selected`
+    /// visible (matches the modal's window so click mapping lines up).
+    fn file_window(&self, list_h: usize) -> usize {
+        self.selected.saturating_sub(list_h.saturating_sub(1))
     }
 
     /// Screen column, within a pane, where a row's content begins: after the
@@ -853,6 +960,8 @@ impl App {
                     self.split = !self.split;
                 } else if k.matches("f") {
                     self.view = View::Stat;
+                } else if k.matches("b") {
+                    self.sidebar = Some(!self.sidebar_visible());
                 } else if k.matches("w") {
                     self.watch = !self.watch;
                 } else if k.matches("?") {
@@ -879,16 +988,64 @@ impl App {
                 }
             }
             Event::MouseClick(m) => {
-                if m.button == MouseButton::Left && self.view == View::Diff && !self.help_open {
-                    let h = self.screen.height();
-                    // Body rows sit above the footer (last row).
-                    if m.y + 1 < h {
-                        let row = m.y as usize;
-                        self.set_cursor(self.scroll + row);
-                        // Text selection is only offered in the unified view;
-                        // split panes have no single reading order.
-                        if !self.split {
-                            let (r, c) = self.point_to_content(m.x, m.y);
+                if m.button != MouseButton::Left {
+                    return Ok(false);
+                }
+                let footer_row = self.viewport_rows() as u16;
+                // The "? help" badge toggles the help grid from any view.
+                if m.y == footer_row && m.x >= self.help_badge_x {
+                    self.help_open = !self.help_open;
+                    return Ok(false);
+                }
+                // Stat modal: a click inside the box keeps it open (and selects
+                // the file row under the cursor, if any); only a click outside
+                // the box closes it.
+                if self.view == View::Stat {
+                    if let Some((bx0, by0, bx1, by1, ly0, list_h, start)) = self.modal_hit {
+                        if m.x >= bx0 && m.x < bx1 && m.y >= by0 && m.y < by1 {
+                            if m.y >= ly0 && m.y < ly0 + list_h as u16 {
+                                let idx = start + (m.y - ly0) as usize;
+                                if idx < self.files.len() {
+                                    self.selected = idx;
+                                }
+                            }
+                            return Ok(false);
+                        }
+                    }
+                    self.view = View::Diff;
+                    return Ok(false);
+                }
+                if self.view == View::Diff && !self.help_open {
+                    let body_h = footer_row;
+                    if m.y >= body_h {
+                        // Footer area (not the help badge): ignore.
+                    } else if self.sidebar_w() > 0 && m.x == self.divider_x() {
+                        // Grab the divider to resize the sidebar.
+                        self.resizing = true;
+                    } else if self.in_sidebar(m.x) {
+                        // Click a file in the sidebar.
+                        let idx = self.file_window(body_h as usize) + m.y as usize;
+                        self.select_file_at(idx);
+                    } else {
+                        let bx = self.body_x();
+                        self.set_cursor(self.scroll + m.y as usize);
+                        // Detect a double-click (same cell, quick succession):
+                        // on a hunk header it expands the folded context.
+                        let now = Instant::now();
+                        let dbl = self.last_click.is_some_and(|(t, lx, ly)| {
+                            ly == m.y
+                                && lx.abs_diff(m.x) <= 1
+                                && now.duration_since(t) < Duration::from_millis(400)
+                        });
+                        self.last_click = Some((now, m.x, m.y));
+                        if dbl && self.on_hunk() && !matches!(self.source, Source::Stdin) {
+                            self.sel = None;
+                            self.last_click = None;
+                            self.expand_here();
+                        } else if !self.split {
+                            // Text selection is only offered in the unified view;
+                            // split panes have no single reading order.
+                            let (r, c) = self.point_to_content(m.x.saturating_sub(bx), m.y);
                             self.sel = Some(Sel {
                                 a_row: r,
                                 a_col: c,
@@ -904,7 +1061,9 @@ impl App {
                 // With button tracking (mode 1002) motion is only reported
                 // while a button is held, so any move during a drag extends the
                 // selection.
-                if self.sel.is_some_and(|s| s.dragging) {
+                if self.resizing {
+                    self.resize_sidebar_to(m.x);
+                } else if self.sel.is_some_and(|s| s.dragging) {
                     let body_h = self.viewport_rows() as u16;
                     // Dragging past the top/bottom edge scrolls, so a selection
                     // can grow beyond the visible rows.
@@ -914,7 +1073,8 @@ impl App {
                         self.scroll_by(1);
                     }
                     let y = m.y.min(body_h.saturating_sub(1));
-                    let (r, c) = self.point_to_content(m.x, y);
+                    let bx = self.body_x();
+                    let (r, c) = self.point_to_content(m.x.saturating_sub(bx), y);
                     if let Some(sel) = self.sel.as_mut() {
                         sel.c_row = r;
                         sel.c_col = c;
@@ -923,6 +1083,7 @@ impl App {
             }
             Event::MouseRelease(m) => {
                 if m.button == MouseButton::Left {
+                    self.resizing = false;
                     if let Some(sel) = self.sel.as_mut() {
                         sel.dragging = false;
                         // A click with no drag selects nothing.
@@ -966,17 +1127,27 @@ impl App {
         }
     }
 
-    /// Copy the current mouse selection to the system clipboard via the
-    /// terminal's OSC 52 (uncurses `set_system_clipboard`), so it works over
-    /// SSH with no external clipboard tool. The text comes from the row model,
-    /// not the screen, so a selection taller than the viewport still copies in
-    /// full, without the line-number gutter or the +/- signs.
+    /// Copy to the system clipboard via the terminal's OSC 52 (uncurses
+    /// `set_system_clipboard`), so it works over SSH with no external clipboard
+    /// tool. With a mouse selection active it copies that; with none it copies
+    /// the whole line under the cursor. The text comes from the row model, not
+    /// the screen, so a selection taller than the viewport still copies in full,
+    /// without the line-number gutter or the +/- signs.
     fn yank(&mut self) -> io::Result<()> {
-        let Some(sel) = self.sel else {
-            return Ok(());
+        let text = match self.sel {
+            Some(sel) => {
+                self.sel = None;
+                self.selection_text(sel)
+            }
+            // No selection: copy the whole line under the cursor.
+            None => {
+                let rows = self.rows();
+                match rows.get(self.cursor) {
+                    Some(row) => slice_cells(&row.content, 0, usize::MAX),
+                    None => return Ok(()),
+                }
+            }
         };
-        let text = self.selection_text(sel);
-        self.sel = None;
         if text.is_empty() {
             return Ok(());
         }
@@ -1032,6 +1203,11 @@ impl App {
             return;
         }
         let w = self.screen.width();
+        let sw = self.sidebar_w();
+        let bx = self.body_x();
+        // Clamp highlights to the diff body so they never spill into a sidebar
+        // (right edge is the terminal width minus the sidebar).
+        let right = if self.sidebar_left() { w } else { w - sw };
         let body_h = self.viewport_rows();
         let scroll = self.scroll;
         let (sr, sc, er, ec) = sel.ordered();
@@ -1046,12 +1222,12 @@ impl App {
                     continue;
                 }
                 let row = &rows[r];
-                let cs = self.content_start(row.kind, Gut::Both);
+                let cs = bx + self.content_start(row.kind, Gut::Both);
                 let len = row.content.len() as u16;
                 let start = if r == sr { sc as u16 } else { 0 };
                 let end = if r == er { ec as u16 } else { len };
-                let sx = (cs + start.min(len)).min(w);
-                let ex = (cs + end.min(len)).min(w);
+                let sx = (cs + start.min(len)).min(right);
+                let ex = (cs + end.min(len)).min(right);
                 if ex > sx {
                     segs.push(((r - scroll) as u16, sx, ex));
                 }
@@ -1091,11 +1267,19 @@ impl App {
         let chrome = self.chrome_h() as u16;
         let body_h = h.saturating_sub(chrome);
 
-        // The diff fills the whole body: full width, starting at the top.
+        // The diff body fills the width left over by the sidebar; the sidebar
+        // sits on the configured side, spanning the body height.
+        let sw = self.sidebar_w();
+        let bx = self.body_x();
+        let bw = w.saturating_sub(sw);
         if self.split {
-            self.render_split(0, w, body_h);
+            self.render_split(bx, bw, body_h);
         } else {
-            self.render_diff(0, w, body_h);
+            self.render_diff(bx, bw, body_h);
+        }
+        if sw > 0 {
+            let sx = if self.sidebar_left() { 0 } else { w - sw };
+            self.render_sidebar(sx, sw, body_h);
         }
 
         if self.view == View::Stat {
@@ -1139,6 +1323,7 @@ impl App {
         // (only when watch mode is on), then the global diffstat.
         let help_badge = " ? help ";
         let help_x = w.saturating_sub(self.width(help_badge));
+        self.help_badge_x = help_x;
         self.screen
             .set_str((help_x, row), help_badge, self.theme.statusbar_help.clone());
 
@@ -1256,6 +1441,57 @@ impl App {
         (x0 + 1, y0 + 1)
     }
 
+    /// Draw the file-list sidebar in `[sx, sx+sw)` for rows `[0, height)`: a
+    /// scrollable list of file names with +/- counts, plus a divider column on
+    /// the edge facing the diff body.
+    fn render_sidebar(&mut self, sx: u16, sw: u16, height: u16) {
+        if sw < 2 {
+            return;
+        }
+        let left = self.sidebar_left();
+        // Divider hugs the body: right edge for a left sidebar, left edge for a
+        // right one. The list fills the remaining columns.
+        let (div_x, list_x) = if left { (sx + sw - 1, sx) } else { (sx, sx + 1) };
+        let list_w = sw - 1;
+        let start = self.file_window(height as usize);
+        let border = self.theme.sidebar_border.clone();
+        for row in 0..height {
+            let idx = start + row as usize;
+            self.draw_file_entry(list_x, row, list_w, idx);
+            self.screen.set_str((div_x, row), "│", border.clone());
+        }
+    }
+
+    /// Draw one file entry (marker, name, right-aligned +/- counts) filling the
+    /// row `[x, x+w)` on the sidebar surface.
+    fn draw_file_entry(&mut self, x: u16, y: u16, w: u16, idx: usize) {
+        let surface = self.theme.dialog.clone();
+        self.screen
+            .set_str((x, y), &" ".repeat(w as usize), surface.clone());
+        let Some(file) = self.files.get(idx) else {
+            return;
+        };
+        let (a, d) = file.stats();
+        let selected = idx == self.selected;
+        let marker = if selected { "▸ " } else { "  " };
+        let count = format!(" +{a} -{d} ");
+        let cw = self.width(&count).min(w);
+        let name_w = w.saturating_sub(2 + cw);
+        let name = self.shorten(file.path(), name_w);
+        let style = if selected {
+            surface.clone().bold()
+        } else {
+            surface.clone()
+        };
+        self.screen.set_str((x, y), &format!("{marker}{name}"), style);
+        let cx = x + w - cw;
+        self.screen.set_str(
+            (cx, y),
+            &self.clip(&count, cw).0,
+            surface.fg(base_fg(&self.theme.header)),
+        );
+    }
+
     /// Modal diffstat: file names with a scaled, colored +/- bar, like
     /// `git diff --stat`, floating over the diff on a secondary-accent surface.
     fn render_stat_modal(&mut self) {
@@ -1265,6 +1501,7 @@ impl App {
         let on_bg = self.theme.dialog.clone();
 
         if self.files.is_empty() {
+            self.modal_hit = None;
             let (ix, iy) = self.draw_box(24, 1);
             self.screen.set_str((ix, iy), "no changes", on_bg.clone());
             return;
@@ -1279,7 +1516,7 @@ impl App {
             .clamp(10, (w as usize).saturating_sub(24));
         let count_w = 5usize;
         let bar_w = 24usize.min((w as usize).saturating_sub(name_w + count_w + 8));
-        let inner_w = (name_w + count_w + bar_w + 4) as u16;
+        let inner_w = (name_w + count_w + bar_w + 5) as u16;
         // Rows: one per file (capped to fit) + a blank + summary line.
         let max_rows = (h.saturating_sub(6)) as usize;
         let list_h = self.files.len().min(max_rows.max(1));
@@ -1288,6 +1525,16 @@ impl App {
 
         // Scroll the list so the selected file stays visible.
         let start = self.selected.saturating_sub(list_h.saturating_sub(1));
+        // Outer box spans one border cell around the inner (ix, iy) region.
+        self.modal_hit = Some((
+            ix - 1,
+            iy - 1,
+            ix + inner_w + 1,
+            iy + inner_h + 1,
+            iy,
+            list_h,
+            start,
+        ));
         let max_count = self
             .files
             .iter()
@@ -1307,7 +1554,7 @@ impl App {
             let (a, d) = file.stats();
             let y = iy + i as u16;
             let selected = idx == self.selected;
-            let marker = if selected { "▸" } else { " " };
+            let marker = if selected { "▸ " } else { "  " };
             let name = self.shorten(file.path(), name_w as u16);
             let name_style = if selected {
                 on_bg.clone().bold()
@@ -1318,7 +1565,7 @@ impl App {
             self.screen
                 .set_str((ix, y), &format!("{marker}{name}{}", " ".repeat(pad)), name_style);
             let count = format!(" {:>count_w$} ", a + d);
-            let cx = ix + 1 + name_w as u16;
+            let cx = ix + 2 + name_w as u16;
             self.screen.set_str((cx, y), &count, on_bg.clone());
             let bx = cx + self.width(&count);
             let scaled = |n: usize| if n == 0 { 0 } else { ((n * bar_w) / max_count).max(1) };
