@@ -82,6 +82,7 @@ diffv is fully mouse-driven too:
 - Click a file in the file modal to select it; the modal stays open until you
   click outside it (or press `enter`).
 - Drag the sidebar's divider to resize it, live.
+- In split view, drag the divider between the two panes to rebalance them.
 - Click the `? help` badge in the status bar to toggle the help footer.
 - Drag across the diff to select text; it lands on your system clipboard (over
   SSH too, via OSC 52).
