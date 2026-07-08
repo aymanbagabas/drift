@@ -133,6 +133,14 @@ enum Gut {
     New,
 }
 
+/// Which split pane a selection lives in. Selection is confined to one pane at
+/// a time since the two sides have independent reading orders.
+#[derive(Clone, Copy, PartialEq)]
+enum Pane {
+    Left,
+    Right,
+}
+
 struct Row {
     kind: RowKind,
     old_no: Option<usize>,
@@ -169,6 +177,8 @@ struct Sel {
     c_row: usize,
     c_col: usize,
     dragging: bool,
+    /// Which split pane the selection is confined to; `None` in unified view.
+    pane: Option<Pane>,
 }
 
 impl Sel {
@@ -738,18 +748,67 @@ impl App {
         self.gutter_w(gut) + sign
     }
 
-    /// Map a pointer at screen (x, y) to a (row, content-column) position in the
-    /// unified view. Column is a character index into the row's content.
-    fn point_to_content(&self, x: u16, y: u16) -> (usize, usize) {
+    /// Map a pointer at screen (x, y) to a (row, content-column) position.
+    /// `pane` selects the split half (its gutter side and screen origin); in
+    /// unified view pass `None`. Column is a cell index into the row's content.
+    fn point_to_content(&self, x: u16, y: u16, pane: Option<Pane>) -> (usize, usize) {
         let rows = self.rows();
         if rows.is_empty() {
             return (0, 0);
         }
         let row = (self.scroll + y as usize).min(rows.len() - 1);
-        let cs = self.content_start(rows[row].kind, Gut::Both);
+        let (origin, cs) = self.pane_geom(rows[row].kind, pane);
         let len = rows[row].content.len();
-        let col = (x.saturating_sub(cs) as usize).min(len);
+        let col = (x.saturating_sub(origin + cs) as usize).min(len);
         (row, col)
+    }
+
+    /// Which split pane screen column `x` falls in (left/right of the divider).
+    /// The divider column itself belongs to neither (it's a resize grab).
+    fn pane_at(&self, x: u16) -> Option<Pane> {
+        let div = self.split_div_x();
+        if x < div {
+            Some(Pane::Left)
+        } else if x > div {
+            Some(Pane::Right)
+        } else {
+            None
+        }
+    }
+
+    /// (screen origin x, content_start) for a row of `kind` under a selection
+    /// pane. Hunk/Note headers span the full body, so they always anchor at the
+    /// body origin regardless of pane.
+    fn pane_geom(&self, kind: RowKind, pane: Option<Pane>) -> (u16, u16) {
+        let bx = self.body_x();
+        match pane {
+            None => (bx, self.content_start(kind, Gut::Both)),
+            Some(_) if matches!(kind, RowKind::Hunk | RowKind::Note) => {
+                (bx, self.content_start(kind, Gut::Both))
+            }
+            Some(Pane::Left) => (bx, self.content_start(kind, Gut::Old)),
+            Some(Pane::Right) => {
+                let bw = self.screen.width().saturating_sub(self.sidebar_w());
+                (bx + self.split_left_w(bw) + 1, self.content_start(kind, Gut::New))
+            }
+        }
+    }
+
+    /// Whether a row of `kind` has content in the selection `pane`. The left
+    /// pane holds context + removals, the right holds context + additions;
+    /// headers belong to both. In unified view every row qualifies.
+    fn row_in_pane(kind: RowKind, pane: Option<Pane>) -> bool {
+        match pane {
+            None => true,
+            Some(Pane::Left) => matches!(
+                kind,
+                RowKind::Context | RowKind::Remove | RowKind::Hunk | RowKind::Note
+            ),
+            Some(Pane::Right) => matches!(
+                kind,
+                RowKind::Context | RowKind::Add | RowKind::Hunk | RowKind::Note
+            ),
+        }
     }
 
     /// Move the cursor line by `delta`, then scroll the viewport just enough to
@@ -1077,7 +1136,6 @@ impl App {
                         let idx = self.file_window(body_h as usize) + m.y as usize;
                         self.select_file_at(idx);
                     } else {
-                        let bx = self.body_x();
                         self.set_cursor(self.scroll + m.y as usize);
                         // Detect a double-click (same cell, quick succession):
                         // on a hunk header it expands the folded context.
@@ -1092,16 +1150,19 @@ impl App {
                             self.sel = None;
                             self.last_click = None;
                             self.expand_here();
-                        } else if !self.split {
-                            // Text selection is only offered in the unified view;
-                            // split panes have no single reading order.
-                            let (r, c) = self.point_to_content(m.x.saturating_sub(bx), m.y);
+                        } else {
+                            // Selection is confined to one pane in split view
+                            // (each side has its own reading order); `None` in
+                            // the unified view spans the whole width.
+                            let pane = if self.split { self.pane_at(m.x) } else { None };
+                            let (r, c) = self.point_to_content(m.x, m.y, pane);
                             self.sel = Some(Sel {
                                 a_row: r,
                                 a_col: c,
                                 c_row: r,
                                 c_col: c,
                                 dragging: true,
+                                pane,
                             });
                         }
                     }
@@ -1127,8 +1188,8 @@ impl App {
                         self.scroll_by(1);
                     }
                     let y = m.y.min(body_h.saturating_sub(1));
-                    let bx = self.body_x();
-                    let (r, c) = self.point_to_content(m.x.saturating_sub(bx), y);
+                    let pane = self.sel.and_then(|s| s.pane);
+                    let (r, c) = self.point_to_content(m.x, y, pane);
                     if let Some(sel) = self.sel.as_mut() {
                         sel.c_row = r;
                         sel.c_col = c;
@@ -1244,6 +1305,11 @@ impl App {
         let er = er.min(rows.len() - 1);
         let mut lines = Vec::new();
         for r in sr..=er {
+            // In split view only the pane's own rows contribute, so the copied
+            // text is one clean side (old or new), not an interleave.
+            if !App::row_in_pane(rows[r].kind, sel.pane) {
+                continue;
+            }
             let cells = &rows[r].content;
             let start = if r == sr { sc } else { 0 };
             let end = if r == er { ec } else { usize::MAX };
@@ -1260,10 +1326,14 @@ impl App {
         }
         let w = self.screen.width();
         let sw = self.sidebar_w();
-        let bx = self.body_x();
         // Clamp highlights to the diff body so they never spill into a sidebar
-        // (right edge is the terminal width minus the sidebar).
-        let right = if self.sidebar_left() { w } else { w - sw };
+        // (right edge is the terminal width minus the sidebar); in split view a
+        // left-pane highlight also stops at the divider.
+        let body_right = if self.sidebar_left() { w } else { w - sw };
+        let right = match sel.pane {
+            Some(Pane::Left) => self.split_div_x().min(body_right),
+            _ => body_right,
+        };
         let body_h = self.viewport_rows();
         let scroll = self.scroll;
         let (sr, sc, er, ec) = sel.ordered();
@@ -1278,7 +1348,11 @@ impl App {
                     continue;
                 }
                 let row = &rows[r];
-                let cs = bx + self.content_start(row.kind, Gut::Both);
+                if !App::row_in_pane(row.kind, sel.pane) {
+                    continue;
+                }
+                let (origin, cstart) = self.pane_geom(row.kind, sel.pane);
+                let cs = origin + cstart;
                 let len = row.content.len() as u16;
                 let start = if r == sr { sc as u16 } else { 0 };
                 let end = if r == er { ec as u16 } else { len };
@@ -2062,7 +2136,24 @@ mod tests {
     }
 
     fn sel(a_row: usize, a_col: usize, c_row: usize, c_col: usize) -> Sel {
-        Sel { a_row, a_col, c_row, c_col, dragging: false }
+        Sel { a_row, a_col, c_row, c_col, dragging: false, pane: None }
+    }
+
+    #[test]
+    fn split_selection_is_confined_to_its_pane() {
+        use super::{App, Pane, RowKind};
+        // Left pane holds context, removals, and headers, not additions.
+        assert!(App::row_in_pane(RowKind::Remove, Some(Pane::Left)));
+        assert!(App::row_in_pane(RowKind::Context, Some(Pane::Left)));
+        assert!(App::row_in_pane(RowKind::Hunk, Some(Pane::Left)));
+        assert!(!App::row_in_pane(RowKind::Add, Some(Pane::Left)));
+        // Right pane holds context, additions, and headers, not removals.
+        assert!(App::row_in_pane(RowKind::Add, Some(Pane::Right)));
+        assert!(App::row_in_pane(RowKind::Context, Some(Pane::Right)));
+        assert!(!App::row_in_pane(RowKind::Remove, Some(Pane::Right)));
+        // Unified view (None) selects every row kind.
+        assert!(App::row_in_pane(RowKind::Add, None));
+        assert!(App::row_in_pane(RowKind::Remove, None));
     }
 
     fn span(text: &str) -> Span {

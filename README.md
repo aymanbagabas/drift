@@ -85,7 +85,8 @@ diffv is fully mouse-driven too:
 - In split view, drag the divider between the two panes to rebalance them.
 - Click the `? help` badge in the status bar to toggle the help footer.
 - Drag across the diff to select text; it lands on your system clipboard (over
-  SSH too, via OSC 52).
+  SSH too, via OSC 52). In split view the selection stays within one pane, so
+  you copy just the old or just the new side.
 - Scroll wheel moves through the diff.
 
 ## Themes
