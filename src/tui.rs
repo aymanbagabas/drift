@@ -248,6 +248,9 @@ pub struct App {
     /// Background row builder feeding `row_cache` after startup so the first
     /// frame isn't blocked on syntax highlighting.
     prefetch: Option<Receiver<(usize, Vec<Row>)>>,
+    /// In-flight async worktree poll: a background thread running the diff so
+    /// the main loop never blocks on git, even on huge repos. `None` when idle.
+    poll_worker: Option<Receiver<String>>,
     selected: usize,
     /// Top visible row (viewport offset).
     scroll: usize,
@@ -332,6 +335,7 @@ impl App {
             raw_files: Vec::new(),
             row_cache: Vec::new(),
             prefetch: None,
+            poll_worker: None,
             selected: 0,
             scroll: 0,
             cursor: 0,
@@ -908,19 +912,22 @@ impl App {
         loop {
             // Fold in any rows the startup worker has finished.
             self.drain_prefetch();
+            // Fold in a finished async worktree poll (non-blocking).
+            self.drain_poll();
             // Expire a transient footer note after its lifetime.
             if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() >= FLASH) {
                 self.flash = None;
             }
-            // Catch unstaged edits the git-internals watcher can't see.
+            // Catch unstaged edits the git-internals watcher can't see. The
+            // diff itself runs on a background thread so the loop never blocks.
             if last_poll.elapsed() >= poll {
-                self.poll_worktree();
+                self.spawn_poll();
                 last_poll = Instant::now();
             }
             self.render()?;
             // Poll faster while the prefetch is still streaming so freshly
             // parsed files appear promptly; idle at 200ms once it's done.
-            let mut timeout = if self.prefetch.is_some() {
+            let mut timeout = if self.prefetch.is_some() || self.poll_worker.is_some() {
                 Duration::from_millis(16)
             } else {
                 Duration::from_millis(200)
@@ -956,17 +963,40 @@ impl App {
     }
 
     /// Poll fallback for unstaged working-tree edits, which don't touch the
-    /// index or refs and so escape the git-internals watcher. Re-runs the diff
-    /// and rebuilds only when the text actually changed, so idle ticks with no
-    /// edits are free. Only active for worktree sources in watch mode.
-    fn poll_worktree(&mut self) {
-        if !self.watch || !self.source.reads_worktree() {
+    /// index or refs and so escape the git-internals watcher. The git call runs
+    /// on a background thread (`poll_worker`) so a slow diff on a large repo
+    /// never stalls rendering or input. One poll is in flight at a time; the
+    /// next spawns only after the previous result is drained. Only active for
+    /// worktree sources in watch mode.
+    fn spawn_poll(&mut self) {
+        if !self.watch || !self.source.reads_worktree() || self.poll_worker.is_some() {
             return;
         }
-        if let Ok(text) = self.source.diff(&self.effective_opts()) {
-            if text != self.last_diff {
-                self.rebuild_from(text);
+        let source = self.source.clone();
+        let opts = self.effective_opts();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            if let Ok(text) = source.diff(&opts) {
+                let _ = tx.send(text);
             }
+        });
+        self.poll_worker = Some(rx);
+    }
+
+    /// Fold in a finished async poll: rebuild only when the diff text actually
+    /// changed, so idle ticks with no edits are free.
+    fn drain_poll(&mut self) {
+        let Some(rx) = self.poll_worker.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(text) => {
+                if text != self.last_diff {
+                    self.rebuild_from(text);
+                }
+            }
+            Err(TryRecvError::Empty) => self.poll_worker = Some(rx), // still running
+            Err(TryRecvError::Disconnected) => {} // finished (diff errored): drop rx
         }
     }
 
