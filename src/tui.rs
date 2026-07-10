@@ -7,10 +7,12 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use regex::{Regex, RegexBuilder};
+
 use uncurses::buffer::{Bounded, Line, SurfaceMut};
 use uncurses::cell::Cell;
 use uncurses::color::Color;
-use uncurses::event::{Event, MouseButton};
+use uncurses::event::{Event, Key, KeyModifiers, MouseButton};
 use uncurses::screen::{MouseTracking, Screen, ScreenOptions};
 use uncurses::style::Style;
 use uncurses::terminal::{TtyInput, TtyOutput};
@@ -51,6 +53,7 @@ struct Theme {
     statusbar_remove: Style,
     statusbar_flags: Style,
     statusbar_stats: Style,
+    statusbar_search: Style,
     statusbar_watch: Style,
     statusbar_help: Style,
     // Help grid.
@@ -61,6 +64,10 @@ struct Theme {
     dialog_border: Style,
     // Sidebar.
     sidebar_border: Style,
+    // Search match highlight (all hits) and the current hit, reusing the
+    // accent palette so every theme gets it without per-theme tuning.
+    search_match: Style,
+    search_current: Style,
 }
 
 impl Theme {
@@ -90,6 +97,7 @@ impl Theme {
             statusbar_remove: sty("statusbar-remove", "remove surface"),
             statusbar_flags: sty("statusbar-flags", "muted surface"),
             statusbar_stats: sty("statusbar-stats", "foreground surface"),
+            statusbar_search: sty("statusbar-search", "secondary surface"),
             statusbar_watch: sty("statusbar-watch", "background add bold"),
             statusbar_help: sty("statusbar-help", "background secondary bold"),
             help_key: sty("help-key", "muted bold"),
@@ -97,6 +105,8 @@ impl Theme {
             dialog: sty("dialog", "foreground background"),
             dialog_border: sty("dialog-border", "surface"),
             sidebar_border: sty("sidebar-border", "surface"),
+            search_match: sty("search-match", "background secondary bold"),
+            search_current: sty("search-current", "background primary bold"),
         }
     }
 }
@@ -196,6 +206,56 @@ impl Sel {
     }
 }
 
+/// The printable text a key produces (glyph, so uppercase and shifted symbols
+/// come through), or None for control/named keys and modifier chords, for
+/// feeding the search prompt.
+fn typed_text(k: &Key) -> Option<String> {
+    if k.modifiers.intersects(KeyModifiers::CTRL | KeyModifiers::ALT | KeyModifiers::SUPER) {
+        return None;
+    }
+    if let Some(t) = &k.text {
+        if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
+            return Some(t.clone());
+        }
+    }
+    match k.char() {
+        Some(c) if !c.is_control() => Some(c.to_string()),
+        _ => None,
+    }
+}
+
+/// Find every regex match in a row's display cells, returning (start_col,
+/// end_col) column ranges. Continuation cells (wide-char tails) carry no text;
+/// a hit's end column extends over the last matched grapheme's full width.
+/// Zero-width matches are skipped.
+fn match_cells(cells: &[Cell], re: &Regex) -> Vec<(usize, usize)> {
+    let mut hay = String::new();
+    let mut byte_col: Vec<usize> = Vec::new();
+    for (col, cell) in cells.iter().enumerate() {
+        if cell.is_continuation() {
+            continue;
+        }
+        let t = cell.content();
+        for _ in t.bytes() {
+            byte_col.push(col);
+        }
+        hay.push_str(t);
+    }
+    let mut out = Vec::new();
+    for m in re.find_iter(&hay) {
+        if m.start() == m.end() {
+            continue;
+        }
+        let b0 = m.start();
+        let b1 = m.end();
+        let start = byte_col[b0];
+        let last = byte_col[b1 - 1];
+        let end = last + cells[last].width().max(1) as usize;
+        out.push((start, end));
+    }
+    out
+}
+
 /// Parse a string into display cells, inserting a continuation cell after each
 /// wide grapheme so `cells.len()` equals the string's width in terminal columns.
 /// That makes a cell index equal to a screen column, matching how the renderer
@@ -251,6 +311,17 @@ pub struct App {
     /// In-flight async worktree poll: a background thread running the diff so
     /// the main loop never blocks on git, even on huge repos. `None` when idle.
     poll_worker: Option<Receiver<String>>,
+    /// Search state (per-file). `query` is the last confirmed needle ("" = no
+    /// active search); `input` is Some while typing in the `/` prompt. `matches`
+    /// holds (row, cell_start, cell_end) hits in the current file; `match_i` is
+    /// the current hit for `n`/`N` navigation and distinct highlighting.
+    query: String,
+    input: Option<String>,
+    /// (cursor, scroll, query) snapshot taken when the `/` prompt opens, so Esc
+    /// restores the pre-search view (Neovim incsearch behaviour).
+    search_return: Option<(usize, usize, String)>,
+    matches: Vec<(usize, usize, usize)>,
+    match_i: Option<usize>,
     selected: usize,
     /// Top visible row (viewport offset).
     scroll: usize,
@@ -336,6 +407,11 @@ impl App {
             row_cache: Vec::new(),
             prefetch: None,
             poll_worker: None,
+            query: String::new(),
+            input: None,
+            search_return: None,
+            matches: Vec::new(),
+            match_i: None,
             selected: 0,
             scroll: 0,
             cursor: 0,
@@ -477,6 +553,7 @@ impl App {
         self.cursor = cur.min(self.rows().len().saturating_sub(1));
         self.scroll = 0;
         self.move_cursor(0);
+        self.refresh_search();
     }
 
     /// Grow the folded context around the current hunk, then pin that hunk to
@@ -576,8 +653,10 @@ impl App {
             ("^d/^u", "half page"),
             ("g/G", "top/bottom"),
             ("{ }", "prev/next hunk"),
-            ("n/p ←/→", "prev/next file"),
+            ("[ ]", "prev/next file"),
             ("tab", "cycle files"),
+            ("/", "search"),
+            ("n/N", "next/prev match"),
             ("s", "split view"),
             ("f", "files"),
             ("b", "sidebar"),
@@ -861,6 +940,75 @@ impl App {
             self.scroll = 0;
             self.cursor = 0;
             self.ensure_rows();
+            self.refresh_search();
+        }
+    }
+
+    /// Recompute matches for the current file if a search is active, else clear.
+    /// Called after any change to the visible rows (file switch, reload).
+    fn refresh_search(&mut self) {
+        if self.query.is_empty() {
+            self.matches.clear();
+            self.match_i = None;
+        } else {
+            self.compute_matches();
+        }
+    }
+
+    /// Scan the current file's rows for `self.query` as a regex, filling
+    /// `self.matches` with (row, cell_start, cell_end) hits. Smart-case: an
+    /// all-lowercase pattern matches case-insensitively, any uppercase makes it
+    /// case-sensitive. An invalid pattern yields no matches (the footer just
+    /// shows "no matches" until it parses).
+    fn compute_matches(&mut self) {
+        let ci = !self.query.chars().any(|c| c.is_uppercase());
+        let re = match RegexBuilder::new(&self.query).case_insensitive(ci).build() {
+            Ok(re) => re,
+            Err(_) => {
+                self.matches.clear();
+                self.match_i = None;
+                return;
+            }
+        };
+        let mut out = Vec::new();
+        for (ri, row) in self.rows().iter().enumerate() {
+            for (start, end) in match_cells(&row.content, &re) {
+                out.push((ri, start, end));
+            }
+        }
+        self.matches = out;
+        self.match_i = None;
+    }
+
+    /// Jump to the first match at or after the cursor (wrapping), used right
+    /// after confirming a query.
+    fn search_to_first(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+        let i = self
+            .matches
+            .iter()
+            .position(|&(r, _, _)| r >= self.cursor)
+            .unwrap_or(0);
+        self.goto_match(i);
+    }
+
+    /// Step to the next/prev match, wrapping around the ends.
+    fn step_match(&mut self, delta: isize) {
+        if self.matches.is_empty() {
+            return;
+        }
+        let n = self.matches.len() as isize;
+        let cur = self.match_i.unwrap_or(0) as isize;
+        let i = ((cur + delta) % n + n) % n;
+        self.goto_match(i as usize);
+    }
+
+    fn goto_match(&mut self, i: usize) {
+        if let Some(&(row, _, _)) = self.matches.get(i) {
+            self.match_i = Some(i);
+            self.set_cursor(row);
         }
     }
 
@@ -1005,13 +1153,59 @@ impl App {
         let page = self.viewport_rows() as isize;
         match ev {
             Event::KeyPress(k) => {
+                // Search prompt captures the keyboard while typing: printable
+                // keys extend the query, Enter confirms and jumps, Esc cancels,
+                // Backspace edits. Nothing else fires until the prompt closes.
+                if let Some(mut buf) = self.input.take() {
+                    if k.matches("escape") {
+                        // restore pre-search view
+                        if let Some((cur, scr, q)) = self.search_return.take() {
+                            self.query = q;
+                            self.cursor = cur;
+                            self.scroll = scr;
+                            self.refresh_search();
+                        }
+                    } else if k.matches("enter") {
+                        self.search_return = None;
+                    } else {
+                        if k.matches("backspace") {
+                            buf.pop();
+                        } else if let Some(t) = typed_text(&k) {
+                            buf.push_str(&t);
+                        } else {
+                            self.input = Some(buf); // ignore non-text keys, stay open
+                            return Ok(false);
+                        }
+                        // Live incsearch: recompute and jump on every edit,
+                        // restoring the origin first so each match is found
+                        // relative to where the search started.
+                        self.input = Some(buf.clone());
+                        self.query = buf;
+                        if let Some((cur, scr, _)) = self.search_return {
+                            self.cursor = cur;
+                            self.scroll = scr;
+                        }
+                        if self.query.is_empty() {
+                            self.matches.clear();
+                            self.match_i = None;
+                        } else {
+                            self.compute_matches();
+                            self.search_to_first();
+                        }
+                    }
+                    return Ok(false);
+                }
                 // Escape closes transient UI in priority order: an active
-                // selection first, then the stat modal. It never quits and
-                // never touches help (help is a toggle-only inline footer,
-                // closed with `?`).
+                // selection first, then an active search, then the stat modal.
+                // It never quits and never touches help (help is a toggle-only
+                // inline footer, closed with `?`).
                 if k.matches("escape") {
                     if self.sel.is_some() {
                         self.sel = None;
+                    } else if !self.query.is_empty() {
+                        self.query.clear();
+                        self.matches.clear();
+                        self.match_i = None;
                     } else if self.view == View::Stat {
                         self.view = View::Diff;
                     }
@@ -1034,9 +1228,9 @@ impl App {
                 if self.view == View::Stat {
                     if k.matches_any(["q", "ctrl+c"]) {
                         return Ok(true);
-                    } else if k.matches_any(["j", "down", "right"]) {
+                    } else if k.matches_any(["j", "down"]) {
                         self.select_file(1);
-                    } else if k.matches_any(["k", "up", "left"]) {
+                    } else if k.matches_any(["k", "up"]) {
                         self.select_file(-1);
                     } else if k.matches_any(["g", "home"]) {
                         self.select_file_at(0);
@@ -1085,9 +1279,16 @@ impl App {
                     self.jump_hunk(1);
                 } else if k.matches_any(["{", "("]) {
                     self.jump_hunk(-1);
-                } else if k.matches_any(["n", "tab", "]", "right"]) {
+                } else if k.matches("/") {
+                    self.search_return = Some((self.cursor, self.scroll, self.query.clone()));
+                    self.input = Some(String::new());
+                } else if k.matches("n") {
+                    self.step_match(1);
+                } else if k.matches("N") {
+                    self.step_match(-1);
+                } else if k.matches_any(["tab", "]"]) {
                     self.select_file(1);
-                } else if k.matches_any(["p", "shift+tab", "[", "left"]) {
+                } else if k.matches_any(["shift+tab", "["]) {
                     self.select_file(-1);
                 } else if k.matches("s") {
                     self.split = !self.split;
@@ -1402,6 +1603,69 @@ impl App {
         }
     }
 
+    /// Overlay search-match highlights on the finished frame: every visible hit
+    /// gets `search_match`, the current hit `search_current`. In split view a
+    /// hit is painted in each pane its row shows (both sides for context, one
+    /// side for add/remove), clamped to that pane like the selection.
+    fn paint_matches(&mut self) {
+        if self.query.is_empty() || self.matches.is_empty() || self.rows().is_empty() {
+            return;
+        }
+        let w = self.screen.width();
+        let sw = self.sidebar_w();
+        let body_right = if self.sidebar_left() { w } else { w - sw };
+        let body_h = self.viewport_rows();
+        let scroll = self.scroll;
+        let split = self.split;
+        let div = self.split_div_x();
+        // (y, sx, ex, current) computed while rows are borrowed immutably.
+        let mut segs: Vec<(u16, u16, u16, bool)> = Vec::new();
+        {
+            let rows = self.rows();
+            for (mi, &(r, cstart, cend)) in self.matches.iter().enumerate() {
+                if r < scroll || r >= scroll + body_h || r >= rows.len() {
+                    continue;
+                }
+                let kind = rows[r].kind;
+                let len = rows[r].content.len() as u16;
+                let y = (r - scroll) as u16;
+                let cur = self.match_i == Some(mi);
+                let panes: &[Option<Pane>] =
+                    if !split || matches!(kind, RowKind::Hunk | RowKind::Note) {
+                        &[None]
+                    } else {
+                        &[Some(Pane::Left), Some(Pane::Right)]
+                    };
+                for &pane in panes {
+                    if pane.is_some() && !App::row_in_pane(kind, pane) {
+                        continue;
+                    }
+                    let (origin, cs) = self.pane_geom(kind, pane);
+                    let base = origin + cs;
+                    let right = if pane == Some(Pane::Left) {
+                        div.min(body_right)
+                    } else {
+                        body_right
+                    };
+                    let sx = (base + (cstart as u16).min(len)).min(right);
+                    let ex = (base + (cend as u16).min(len)).min(right);
+                    if ex > sx {
+                        segs.push((y, sx, ex, cur));
+                    }
+                }
+            }
+        }
+        let (mstyle, cstyle) = (self.theme.search_match.clone(), self.theme.search_current.clone());
+        for (y, sx, ex, cur) in segs {
+            let st = if cur { &cstyle } else { &mstyle };
+            for x in sx..ex {
+                if let Some(c) = self.screen.cell_mut((x, y)) {
+                    c.style = st.clone();
+                }
+            }
+        }
+    }
+
     fn update_title(&mut self) -> io::Result<()> {
         let want = match self.files.get(self.selected) {
             Some(f) => format!("{} · diffv", f.path()),
@@ -1454,7 +1718,8 @@ impl App {
         if self.view == View::Stat {
             self.render_stat_modal();
         }
-        // Overlay the selection highlight on top of the finished frame.
+        // Overlay search-match highlights, then the selection on top.
+        self.paint_matches();
         if let Some(sel) = self.sel {
             self.paint_selection(sel);
         }
@@ -1538,9 +1803,32 @@ impl App {
             put(self, &mut x, " ", bar.clone());
         }
 
-        // A transient note (e.g. "copied 3 lines") sits right after the
-        // per-file stats and auto-expires; clip it to the space left before the
-        // right-aligned global stats.
+        // Search badge sits right after the per-file stats: the prompt while
+        // typing, else the match counter once confirmed. Secondary fg, no
+        // distinct background. It advances `x` so it never overlaps the flash
+        // note below.
+        let search_badge = if let Some(buf) = &self.input {
+            Some(format!(" /{buf} "))
+        } else if !self.query.is_empty() {
+            Some(if self.matches.is_empty() {
+                " no matches ".to_string()
+            } else {
+                let n = self.match_i.map(|i| i + 1).unwrap_or(0);
+                format!(" [{}/{}] ", n, self.matches.len())
+            })
+        } else {
+            None
+        };
+        if let Some(badge) = search_badge {
+            if x < stats_x {
+                let (badge, bw) = self.clip(&badge, stats_x - x);
+                self.screen
+                    .set_str((x, row), &badge, self.theme.statusbar_search.clone());
+                x += bw;
+            }
+        }
+        // Transient note (e.g. "copied 3 lines") auto-expires; it renders after
+        // the search badge so an active search never suppresses it.
         if let Some((msg, _)) = self.flash.clone() {
             if x < stats_x {
                 let badge = format!(" {msg} ");
@@ -2156,7 +2444,8 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tabs, fit, fit_tail, slice_cells, text_cells, Sel, Span};
+    use super::{expand_tabs, fit, fit_tail, match_cells, slice_cells, text_cells, Sel, Span};
+    use regex::RegexBuilder;
     use uncurses::text::{grapheme_cells, WidthMode};
 
     // Exercise the same fitting logic clip() uses; clip() itself needs a live
@@ -2184,6 +2473,30 @@ mod tests {
         // Unified view (None) selects every row kind.
         assert!(App::row_in_pane(RowKind::Add, None));
         assert!(App::row_in_pane(RowKind::Remove, None));
+    }
+
+    #[test]
+    fn search_maps_matches_to_columns() {
+        let re = |p: &str, ci: bool| RegexBuilder::new(p).case_insensitive(ci).build().unwrap();
+        // Substring hits map to (start_col, end_col) cell ranges, one per
+        // occurrence. "o" appears twice in "hello world".
+        let cells = text_cells("hello world");
+        assert_eq!(match_cells(&cells, &re("o", false)), vec![(4, 5), (7, 8)]);
+        // Smart-case: case-insensitive matches either case.
+        let cells = text_cells("Foo BAR foo");
+        assert_eq!(match_cells(&cells, &re("foo", true)), vec![(0, 3), (8, 11)]);
+        // Case-sensitive only hits the exact case.
+        assert_eq!(match_cells(&cells, &re("foo", false)), vec![(8, 11)]);
+        // Regex metacharacters work: `\w+` spans each run of word chars.
+        assert_eq!(match_cells(&cells, &re(r"\w+", false)), vec![(0, 3), (4, 7), (8, 11)]);
+        // Wide chars: a match after a 2-column glyph lands on the right columns
+        // and its end covers the full width of a wide match.
+        let cells = text_cells("世x界");
+        assert_eq!(match_cells(&cells, &re("x", false)), vec![(2, 3)]);
+        assert_eq!(match_cells(&cells, &re("界", false)), vec![(3, 5)]);
+        // No match; zero-width matches are skipped.
+        assert!(match_cells(&cells, &re("z", false)).is_empty());
+        assert!(match_cells(&cells, &re("", false)).is_empty());
     }
 
     fn span(text: &str) -> Span {

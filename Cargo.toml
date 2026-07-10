@@ -20,6 +20,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 toml = "1"
 two-face = { version = "0.5.1", default-features = false, features = ["syntect-fancy"] }
+regex = "1.13.0"
 
 [profile.release]
 opt-level = "z"

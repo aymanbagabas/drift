@@ -5,9 +5,9 @@ A git diff pager that actually wants to be looked at.
 `diffv` takes the diff you already know and drops it into a real terminal UI:
 syntax highlighting, word-level change emphasis, split or unified views, a
 file-list modal and a live sidebar you can click and drag to resize,
-jump-to-hunk, open-in-`$EDITOR`, and a live mode that repaints the moment your
-index or branch moves. Point it at a commit, your staging area, or your working
-tree, or just pipe a diff into it like any other pager.
+jump-to-hunk, in-file search, open-in-`$EDITOR`, and a live mode that repaints
+the moment your index or branch moves. Point it at a commit, your staging area,
+or your working tree, or just pipe a diff into it like any other pager.
 
 No config needed to start. Themes, colors, and keys are all yours to bend later.
 
@@ -61,7 +61,9 @@ Some flags worth knowing:
 | `^d` `^u` | Half page down / up |
 | `g` `G` | Top / bottom |
 | `{` `}` | Previous / next hunk |
-| `n` `p` / `←` `→` / `tab` | Previous / next file |
+| `[` `]` / `tab` `⇧tab` | Previous / next file |
+| `/` | Search the current file (regex, smart-case) |
+| `n` `N` | Next / previous match |
 | `s` | Toggle split view |
 | `f` | File list modal |
 | `b` | Toggle the file sidebar |
