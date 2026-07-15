@@ -120,6 +120,7 @@ struct Span {
 
 #[derive(Clone, Copy, PartialEq)]
 enum RowKind {
+    File,
     Hunk,
     Add,
     Remove,
@@ -303,18 +304,29 @@ pub struct App {
     /// The raw unified-diff text for each file, in the same order as `files`,
     /// so `Y` can copy an exact per-file patch without reconstructing it.
     raw_files: Vec<String>,
-    /// Precomputed display rows per file, built lazily and kept until reload.
-    row_cache: Vec<Option<Vec<Row>>>,
-    /// Background row builder feeding `row_cache` after startup so the first
+    /// The whole diff as one continuous document: every file's rows
+    /// concatenated, each preceded by a `RowKind::File` header. `file_starts[i]`
+    /// is the doc-row index of file `i`'s header, so the file under the cursor
+    /// (`selected`) and the file picker's scroll target are both derived from a
+    /// row index. Built lazily by the prefetch worker after startup.
+    doc_rows: Vec<Row>,
+    file_starts: Vec<usize>,
+    /// Background row builder feeding `doc_rows` after startup so the first
     /// frame isn't blocked on syntax highlighting.
     prefetch: Option<Receiver<(usize, Vec<Row>)>>,
     /// In-flight async worktree poll: a background thread running the diff so
     /// the main loop never blocks on git, even on huge repos. `None` when idle.
     poll_worker: Option<Receiver<String>>,
-    /// Search state (per-file). `query` is the last confirmed needle ("" = no
-    /// active search); `input` is Some while typing in the `/` prompt. `matches`
-    /// holds (row, cell_start, cell_end) hits in the current file; `match_i` is
-    /// the current hit for `n`/`N` navigation and distinct highlighting.
+    /// In-flight async document rebuild (reload/poll/expand): a background
+    /// thread parses the new diff and builds the whole document off the main
+    /// thread. The old document stays on screen and interactive until the new
+    /// one arrives, then swaps in atomically with the cursor position restored.
+    /// `None` when idle; superseded rebuilds are dropped (their sends fail).
+    rebuild_worker: Option<Receiver<Rebuilt>>,
+    /// Search state (whole-document). `query` is the last confirmed pattern ("" =
+    /// no active search); `input` is Some while typing in the `/` prompt.
+    /// `matches` holds (doc_row, cell_start, cell_end) hits across all files;
+    /// `match_i` is the current hit for `n`/`N` navigation and highlighting.
     query: String,
     input: Option<String>,
     /// (cursor, scroll, query) snapshot taken when the `/` prompt opens, so Esc
@@ -404,9 +416,11 @@ impl App {
             toplevel: crate::git::toplevel(),
             files: Vec::new(),
             raw_files: Vec::new(),
-            row_cache: Vec::new(),
+            doc_rows: Vec::new(),
+            file_starts: Vec::new(),
             prefetch: None,
             poll_worker: None,
+            rebuild_worker: None,
             query: String::new(),
             input: None,
             search_return: None,
@@ -458,12 +472,14 @@ impl App {
         self.selected = 0;
         self.cursor = 0;
         self.scroll = 0;
-        self.row_cache = (0..self.files.len()).map(|_| None).collect();
+        self.doc_rows.clear();
+        self.file_starts.clear();
         self.spawn_prefetch();
     }
 
-    /// Spawn a worker that builds every file's rows (the selected file first so
-    /// it shows soonest) and streams them back over a channel.
+    /// Spawn a worker that builds every file's body rows in order and streams
+    /// them back, so the continuous document fills in from the top without
+    /// blocking the first frame on syntax highlighting.
     fn spawn_prefetch(&mut self) {
         if self.files.is_empty() {
             self.prefetch = None;
@@ -473,12 +489,9 @@ impl App {
         let hl = Arc::clone(&self.highlighter);
         let intraline = self.config.intraline_enabled();
         let tab = self.config.tab_width;
-        let sel = self.selected;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let n = files.len();
-            let order = std::iter::once(sel).chain((0..n).filter(|&i| i != sel));
-            for idx in order {
+            for idx in 0..files.len() {
                 let rows = build_file_rows(&files[idx], &hl, intraline, tab);
                 if tx.send((idx, rows)).is_err() {
                     return; // receiver dropped (reload/quit): stop early.
@@ -488,23 +501,22 @@ impl App {
         self.prefetch = Some(rx);
     }
 
-    /// Move any rows the prefetch worker has finished into the cache. Returns
-    /// whether the selected file's rows just landed (so the caller can repaint).
+    /// Append any file bodies the prefetch worker has finished to the document.
+    /// The worker sends files in order, so each arrival appends below the
+    /// existing rows (headers + bodies stay in file order).
     fn drain_prefetch(&mut self) {
         let Some(rx) = self.prefetch.take() else {
             return;
         };
-        let mut selected_ready = false;
+        let mut got = false;
         loop {
             match rx.try_recv() {
-                Ok((idx, rows)) => {
-                    if let Some(slot) = self.row_cache.get_mut(idx) {
-                        if slot.is_none() {
-                            *slot = Some(rows);
-                            if idx == self.selected {
-                                selected_ready = true;
-                            }
-                        }
+                Ok((idx, body)) => {
+                    if let Some(f) = self.files.get(idx) {
+                        self.file_starts.push(self.doc_rows.len());
+                        self.doc_rows.push(file_header_row(f));
+                        self.doc_rows.extend(body);
+                        got = true;
                     }
                 }
                 Err(TryRecvError::Empty) => {
@@ -514,7 +526,7 @@ impl App {
                 Err(TryRecvError::Disconnected) => break, // worker done: drop rx.
             }
         }
-        if selected_ready {
+        if got {
             self.move_cursor(0);
         }
     }
@@ -535,69 +547,124 @@ impl App {
         self.rebuild_from(text);
     }
 
-    /// Rebuild the view from already-fetched diff text, preserving the cursor
-    /// position. Shared by `reload` and the worktree poll (which passes the
-    /// text it just fetched to compare, avoiding a second git call).
+    /// Kick off an async rebuild from already-fetched diff text. Shared by
+    /// `reload` and the worktree poll. The parse + whole-document build (syntax
+    /// highlighting included) runs on a background thread; the current document
+    /// stays on screen and fully interactive until the new one is ready, then
+    /// `drain_rebuild` swaps it in with the cursor position restored. A newer
+    /// rebuild simply replaces the receiver, so the stale worker's send fails
+    /// and it exits. `last_diff` is set now so the poll won't re-fire the same
+    /// text while the build is in flight.
     fn rebuild_from(&mut self, text: String) {
-        let (sel, cur) = (self.selected, self.cursor);
         // Drop any in-flight startup prefetch so its (now stale) rows can't
-        // land in the freshly rebuilt cache.
+        // land after the swap.
         self.prefetch = None;
-        self.files = diff::parse(&text);
-        self.raw_files = diff::split_files(&text);
-        self.last_diff = text;
-        self.selected = sel.min(self.files.len().saturating_sub(1));
-        // Invalidate the per-file row cache; rows are rebuilt lazily on view.
-        self.row_cache = (0..self.files.len()).map(|_| None).collect();
-        self.ensure_rows();
-        self.cursor = cur.min(self.rows().len().saturating_sub(1));
-        self.scroll = 0;
-        self.move_cursor(0);
-        self.refresh_search();
+        self.last_diff = text.clone();
+        let hl = Arc::clone(&self.highlighter);
+        let intraline = self.config.intraline_enabled();
+        let tab = self.config.tab_width;
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let files = diff::parse(&text);
+            let raw = diff::split_files(&text);
+            let (doc, starts) = assemble_document(&files, &hl, intraline, tab);
+            let _ = tx.send(Rebuilt {
+                files,
+                raw,
+                doc,
+                starts,
+            });
+        });
+        self.rebuild_worker = Some(rx);
     }
 
-    /// Grow the folded context around the current hunk, then pin that hunk to
-    /// the same screen row so expanding doesn't scroll the view.
-    /// ponytail: anchors by hunk ordinal; if a big expansion merges adjacent
-    /// hunks the ordinal can shift and we fall back to reload's position.
-    fn expand_here(&mut self) {
-        let screen_off = self.cursor.saturating_sub(self.scroll);
-        let ord = self.hunk_ordinal(self.cursor);
-        self.expand += 10;
-        self.reload();
-        if let Some(idx) = self.nth_hunk_row(ord) {
-            self.cursor = idx;
-            self.scroll = idx.saturating_sub(screen_off);
-            self.move_cursor(0);
+    /// Swap in a finished background rebuild, restoring the cursor to the same
+    /// place in the new document. The anchor is captured against the *current*
+    /// (old) document at swap time, so navigation during the build is honoured.
+    fn drain_rebuild(&mut self) {
+        let Some(rx) = self.rebuild_worker.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(r) => {
+                let anchor = self.capture_anchor();
+                self.files = r.files;
+                self.raw_files = r.raw;
+                self.doc_rows = r.doc;
+                self.file_starts = r.starts;
+                let row = self.resolve_anchor(&anchor);
+                self.cursor = row;
+                self.scroll = row.saturating_sub(anchor.screen_off);
+                self.move_cursor(0);
+                self.refresh_search();
+                // A wholesale document swap can move content past rows that were
+                // blank before; force a full repaint so nothing stale lingers.
+                self.screen.invalidate();
+            }
+            Err(TryRecvError::Empty) => self.rebuild_worker = Some(rx), // still building
+            Err(TryRecvError::Disconnected) => {} // superseded/errored: drop rx
         }
     }
 
-    /// 0-based index of the hunk the cursor sits on (or the most recent above).
-    fn hunk_ordinal(&self, cursor: usize) -> usize {
-        self.rows()
+    /// Capture where the cursor sits, semantically, so it can be found again in
+    /// a rebuilt document: which file (by path), which line (or hunk), and how
+    /// far down the screen it was.
+    fn capture_anchor(&self) -> Anchor {
+        let screen_off = self.cursor.saturating_sub(self.scroll);
+        let file = self.file_at(self.cursor);
+        let path = self
+            .files
+            .get(file)
+            .map(|f| f.path().to_string())
+            .unwrap_or_default();
+        let target = match self.doc_rows.get(self.cursor).map(|r| r.kind) {
+            Some(RowKind::Add) | Some(RowKind::Remove) | Some(RowKind::Context) => {
+                let r = &self.doc_rows[self.cursor];
+                AnchorTarget::Line(r.old_no, r.new_no)
+            }
+            Some(RowKind::Hunk) => AnchorTarget::Hunk(self.hunk_ord_in_file(file, self.cursor)),
+            _ => AnchorTarget::Start,
+        };
+        Anchor {
+            path,
+            target,
+            screen_off,
+        }
+    }
+
+    /// Resolve a captured anchor to a row in the current document. Falls back to
+    /// the file's header (or the top, if the file is gone) when the exact line
+    /// or hunk can't be found.
+    fn resolve_anchor(&self, a: &Anchor) -> usize {
+        resolve_anchor_row(&self.files, &self.file_starts, &self.doc_rows, a)
+    }
+
+    /// 0-based index of the hunk `cursor` sits on, counted within its own file.
+    fn hunk_ord_in_file(&self, file: usize, cursor: usize) -> usize {
+        let start = self.file_starts.get(file).copied().unwrap_or(0);
+        self.doc_rows[start..=cursor]
             .iter()
-            .take(cursor + 1)
             .filter(|r| r.kind == RowKind::Hunk)
             .count()
             .saturating_sub(1)
     }
 
-    /// Row index of the nth (0-based) hunk header.
-    fn nth_hunk_row(&self, ord: usize) -> Option<usize> {
-        self.rows()
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.kind == RowKind::Hunk)
-            .nth(ord)
-            .map(|(i, _)| i)
+    /// The file index whose rows contain document row `row`.
+    fn file_at(&self, row: usize) -> usize {
+        file_of_row(&self.file_starts, row)
     }
 
-    /// The display rows for the selected file (empty if none).
+    /// Grow the folded context around the current hunk. The async rebuild's
+    /// anchor pins the hunk the cursor is on back to the same screen row, so
+    /// expanding doesn't scroll the view.
+    fn expand_here(&mut self) {
+        self.expand += 10;
+        self.reload();
+    }
+
+    /// The whole continuous document (empty until the prefetch/build fills it).
     fn rows(&self) -> &[Row] {
-        self.row_cache
-            .get(self.selected)
-            .and_then(|o| o.as_deref())
-            .unwrap_or(&[])
+        &self.doc_rows
     }
 
     /// Whether the cursor is currently on a hunk header row.
@@ -605,31 +672,6 @@ impl App {
         self.rows()
             .get(self.cursor)
             .is_some_and(|r| r.kind == RowKind::Hunk)
-    }
-
-    /// Build the selected file's rows if they aren't cached yet.
-    fn ensure_rows(&mut self) {
-        if self
-            .row_cache
-            .get(self.selected)
-            .is_some_and(|o| o.is_none())
-        {
-            let rows = self.build_rows(self.selected);
-            self.row_cache[self.selected] = Some(rows);
-        }
-    }
-
-    /// Flatten a file into styled display rows (syntax + intra-line spans).
-    fn build_rows(&self, idx: usize) -> Vec<Row> {
-        match self.files.get(idx) {
-            Some(file) => build_file_rows(
-                file,
-                &self.highlighter,
-                self.config.intraline_enabled(),
-                self.config.tab_width,
-            ),
-            None => Vec::new(),
-        }
     }
 
     fn viewport_rows(&self) -> usize {
@@ -866,7 +908,7 @@ impl App {
         let bx = self.body_x();
         match pane {
             None => (bx, self.content_start(kind, Gut::Both)),
-            Some(_) if matches!(kind, RowKind::Hunk | RowKind::Note) => {
+            Some(_) if matches!(kind, RowKind::Hunk | RowKind::Note | RowKind::File) => {
                 (bx, self.content_start(kind, Gut::Both))
             }
             Some(Pane::Left) => (bx, self.content_start(kind, Gut::Old)),
@@ -885,11 +927,11 @@ impl App {
             None => true,
             Some(Pane::Left) => matches!(
                 kind,
-                RowKind::Context | RowKind::Remove | RowKind::Hunk | RowKind::Note
+                RowKind::Context | RowKind::Remove | RowKind::Hunk | RowKind::Note | RowKind::File
             ),
             Some(Pane::Right) => matches!(
                 kind,
-                RowKind::Context | RowKind::Add | RowKind::Hunk | RowKind::Note
+                RowKind::Context | RowKind::Add | RowKind::Hunk | RowKind::Note | RowKind::File
             ),
         }
     }
@@ -909,6 +951,8 @@ impl App {
             self.scroll = self.cursor + 1 - vh;
         }
         self.scroll = self.scroll.min(self.max_scroll());
+        // The "selected" file is simply whichever one the cursor sits in.
+        self.selected = self.file_at(self.cursor);
     }
 
     fn cursor_to(&mut self, idx: usize) {
@@ -925,27 +969,27 @@ impl App {
     }
 
     fn select_file(&mut self, delta: isize) {
-        if self.files.is_empty() {
+        if self.file_starts.is_empty() {
             return;
         }
-        let n = self.files.len() as isize;
-        let new = (self.selected as isize + delta).clamp(0, n - 1) as usize;
+        let n = self.file_starts.len() as isize;
+        let cur = self.file_at(self.cursor) as isize;
+        let new = (cur + delta).clamp(0, n - 1) as usize;
         self.select_file_at(new);
     }
 
-    /// Select a file by absolute index.
+    /// Scroll the document to the start of file `idx`, pinning its header row to
+    /// the top of the viewport.
     fn select_file_at(&mut self, idx: usize) {
-        if idx < self.files.len() && idx != self.selected {
-            self.selected = idx;
-            self.scroll = 0;
-            self.cursor = 0;
-            self.ensure_rows();
-            self.refresh_search();
+        if let Some(&start) = self.file_starts.get(idx) {
+            self.cursor = start;
+            self.scroll = start.min(self.max_scroll());
+            self.move_cursor(0);
         }
     }
 
-    /// Recompute matches for the current file if a search is active, else clear.
-    /// Called after any change to the visible rows (file switch, reload).
+    /// Recompute matches if a search is active, else clear. Called after any
+    /// change to the document (reload, prefetch fill).
     fn refresh_search(&mut self) {
         if self.query.is_empty() {
             self.matches.clear();
@@ -955,7 +999,7 @@ impl App {
         }
     }
 
-    /// Scan the current file's rows for `self.query` as a regex, filling
+    /// Scan the whole document for `self.query` as a regex, filling
     /// `self.matches` with (row, cell_start, cell_end) hits. Smart-case: an
     /// all-lowercase pattern matches case-insensitively, any uppercase makes it
     /// case-sensitive. An invalid pattern yields no matches (the footer just
@@ -1062,6 +1106,8 @@ impl App {
             self.drain_prefetch();
             // Fold in a finished async worktree poll (non-blocking).
             self.drain_poll();
+            // Swap in a finished async document rebuild (non-blocking).
+            self.drain_rebuild();
             // Expire a transient footer note after its lifetime.
             if self.flash.as_ref().is_some_and(|(_, t)| t.elapsed() >= FLASH) {
                 self.flash = None;
@@ -1075,7 +1121,10 @@ impl App {
             self.render()?;
             // Poll faster while the prefetch is still streaming so freshly
             // parsed files appear promptly; idle at 200ms once it's done.
-            let mut timeout = if self.prefetch.is_some() || self.poll_worker.is_some() {
+            let mut timeout = if self.prefetch.is_some()
+                || self.poll_worker.is_some()
+                || self.rebuild_worker.is_some()
+            {
                 Duration::from_millis(16)
             } else {
                 Duration::from_millis(200)
@@ -1242,8 +1291,6 @@ impl App {
                         self.help_open = !self.help_open;
                     } else if k.matches_any(["enter", "e"]) {
                         self.view = View::Diff;
-                        self.ensure_rows();
-                        self.cursor_to(0);
                     } else if k.matches("r") {
                         self.reload();
                     } else if k.matches("Y") {
@@ -2049,12 +2096,9 @@ impl App {
     }
 
     fn render_diff(&mut self, x: u16, width: u16, body_h: u16) {
-        // Move the cached rows out so we can freely borrow `self.screen`
+        // Move the document rows out so we can freely borrow `self.screen`
         // while iterating; restored right after rendering.
-        let rows = match self.row_cache.get_mut(self.selected).and_then(|o| o.take()) {
-            Some(r) => r,
-            None => return,
-        };
+        let rows = std::mem::take(&mut self.doc_rows);
         for row in 0..body_h {
             let idx = self.scroll + row as usize;
             let Some(r) = rows.get(idx) else {
@@ -2070,16 +2114,14 @@ impl App {
                 match r.kind {
                     RowKind::Add => self.theme.add_line_bg,
                     RowKind::Remove => self.theme.remove_line_bg,
-                    RowKind::Hunk => self.theme.header_bg,
+                    RowKind::Hunk | RowKind::File => self.theme.header_bg,
                     _ => None,
                 }
             };
             self.draw_diff_row(r, x, width, y, row_bg, Gut::Both);
         }
         // Restore the rows we borrowed.
-        if let Some(slot) = self.row_cache.get_mut(self.selected) {
-            *slot = Some(rows);
-        }
+        self.doc_rows = rows;
     }
 
     /// Side-by-side rendering: old lines on the left pane, new on the right,
@@ -2093,10 +2135,7 @@ impl App {
         let div_x = x + left_w;
         let right_x = div_x + 1;
         let right_w = width - left_w - 1;
-        let rows = match self.row_cache.get_mut(self.selected).and_then(|o| o.take()) {
-            Some(r) => r,
-            None => return,
-        };
+        let rows = std::mem::take(&mut self.doc_rows);
         for row in 0..body_h {
             let idx = self.scroll + row as usize;
             let Some(r) = rows.get(idx) else {
@@ -2110,6 +2149,11 @@ impl App {
                 None
             };
             match r.kind {
+                RowKind::File => {
+                    let hbg = cbg.or(self.theme.header_bg);
+                    self.draw_diff_row(r, x, width, y, hbg, Gut::Both);
+                    continue;
+                }
                 RowKind::Hunk => {
                     let hbg = cbg.or(self.theme.header_bg);
                     self.draw_diff_row(r, x, width, y, hbg, Gut::Both);
@@ -2140,9 +2184,7 @@ impl App {
             }
             self.screen.set_str((div_x, y), "│", dv);
         }
-        if let Some(slot) = self.row_cache.get_mut(self.selected) {
-            *slot = Some(rows);
-        }
+        self.doc_rows = rows;
     }
 
     /// Hatch an empty pane half with diagonal slashes (used where a split-view
@@ -2199,6 +2241,12 @@ impl App {
             RowKind::Add => ("+", &self.theme.add, self.theme.add.clone().bold()),
             RowKind::Remove => ("-", &self.theme.remove, self.theme.remove.clone().bold()),
             RowKind::Context => (" ", &self.theme.context, self.theme.context.clone()),
+            RowKind::File => {
+                let (s, _) = self.clip(&r.spans[0].text, width);
+                self.screen
+                    .set_str((cx, y), &s, bg(self.theme.header.clone().bold()));
+                return;
+            }
             RowKind::Hunk => {
                 let (s, _) = self.clip(&r.spans[0].text, width);
                 self.screen
@@ -2310,6 +2358,101 @@ fn base_fg(style: &Style) -> Option<Color> {
 
 /// Flatten a single file diff into styled display rows. Free-standing so it can
 /// run on the startup prefetch thread as well as the lazy main-thread path.
+/// The file index owning document row `row`, given each file's start offset.
+/// Rows before the first start (there are none in practice) map to file 0.
+fn file_of_row(starts: &[usize], row: usize) -> usize {
+    starts.partition_point(|&s| s <= row).saturating_sub(1)
+}
+
+/// A finished background document rebuild, swapped in atomically by
+/// `drain_rebuild` so the old document stays interactive until it's ready.
+struct Rebuilt {
+    files: Vec<FileDiff>,
+    raw: Vec<String>,
+    doc: Vec<Row>,
+    starts: Vec<usize>,
+}
+
+/// A semantic bookmark of the cursor position, resilient to a document being
+/// rebuilt: the file (by path), what to home in on within it, and how far down
+/// the screen the cursor was.
+struct Anchor {
+    path: String,
+    target: AnchorTarget,
+    screen_off: usize,
+}
+
+enum AnchorTarget {
+    /// A content line, matched by new-side then old-side line number.
+    Line(Option<usize>, Option<usize>),
+    /// The nth (0-based) hunk header within the file.
+    Hunk(usize),
+    /// The file header (fallback when no line/hunk applies).
+    Start,
+}
+
+/// Resolve a captured anchor to a row in a document. Falls back to the file's
+/// header row (or row 0, if the file is gone) when the exact line or hunk can't
+/// be found. Free-standing so the mapping is unit-testable.
+fn resolve_anchor_row(files: &[FileDiff], starts: &[usize], doc: &[Row], a: &Anchor) -> usize {
+    let Some(fi) = files.iter().position(|f| f.path() == a.path.as_str()) else {
+        return 0;
+    };
+    let start = starts[fi];
+    let end = starts.get(fi + 1).copied().unwrap_or(doc.len());
+    let range = &doc[start..end];
+    match &a.target {
+        AnchorTarget::Start => start,
+        AnchorTarget::Line(old, new) => {
+            let by_new = new.and_then(|n| range.iter().position(|r| r.new_no == Some(n)));
+            let by_old = old.and_then(|o| range.iter().position(|r| r.old_no == Some(o)));
+            start + by_new.or(by_old).unwrap_or(0)
+        }
+        AnchorTarget::Hunk(ord) => range
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.kind == RowKind::Hunk)
+            .nth(*ord)
+            .map(|(i, _)| start + i)
+            .unwrap_or(start),
+    }
+}
+
+/// Build the whole continuous document: each file's header row followed by its
+/// body rows, recording each file's start offset. Free-standing so it can run
+/// on a background rebuild thread.
+fn assemble_document(
+    files: &[FileDiff],
+    hl: &Highlighter,
+    intraline: bool,
+    tab: usize,
+) -> (Vec<Row>, Vec<usize>) {
+    let mut doc = Vec::new();
+    let mut starts = Vec::with_capacity(files.len());
+    for f in files {
+        starts.push(doc.len());
+        doc.push(file_header_row(f));
+        doc.extend(build_file_rows(f, hl, intraline, tab));
+    }
+    (doc, starts)
+}
+
+/// A `git diff`-style header row that introduces a file in the continuous
+/// document (renames show both paths, matching real unified-diff output).
+fn file_header_row(f: &FileDiff) -> Row {
+    let text = format!("diff --git a/{} b/{}", f.old_path, f.new_path);
+    Row::new(
+        RowKind::File,
+        None,
+        None,
+        vec![Span {
+            fg: None,
+            changed: false,
+            text,
+        }],
+    )
+}
+
 fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool, tab: usize) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     if file.is_binary {
@@ -2444,7 +2587,7 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tabs, fit, fit_tail, match_cells, slice_cells, text_cells, Sel, Span};
+    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, slice_cells, text_cells, Sel, Span};
     use regex::RegexBuilder;
     use uncurses::text::{grapheme_cells, WidthMode};
 
@@ -2473,6 +2616,65 @@ mod tests {
         // Unified view (None) selects every row kind.
         assert!(App::row_in_pane(RowKind::Add, None));
         assert!(App::row_in_pane(RowKind::Remove, None));
+    }
+
+    #[test]
+    fn file_of_row_maps_document_rows_to_files() {
+        // Three files whose headers sit at rows 0, 5, 12.
+        let starts = [0usize, 5, 12];
+        assert_eq!(file_of_row(&starts, 0), 0); // first header
+        assert_eq!(file_of_row(&starts, 4), 0); // last row of file 0
+        assert_eq!(file_of_row(&starts, 5), 1); // exactly the next header
+        assert_eq!(file_of_row(&starts, 11), 1);
+        assert_eq!(file_of_row(&starts, 12), 2); // last file's header
+        assert_eq!(file_of_row(&starts, 99), 2); // past the end stays in last
+    }
+
+    #[test]
+    fn resolve_anchor_finds_line_hunk_and_fallbacks() {
+        use super::{resolve_anchor_row, Anchor, AnchorTarget, Row, RowKind, Span};
+        use crate::diff::FileDiff;
+        fn fd(path: &str) -> FileDiff {
+            FileDiff {
+                old_path: path.into(),
+                new_path: path.into(),
+                hunks: vec![],
+                is_binary: false,
+                notes: vec![],
+            }
+        }
+        fn row(kind: RowKind, old: Option<usize>, new: Option<usize>) -> Row {
+            Row::new(kind, old, new, vec![Span { fg: None, changed: false, text: String::new() }])
+        }
+        // Two files: a.txt (rows 0..=4) and b.txt (rows 5..=9). Each has a File
+        // header, a Hunk header, then three content lines.
+        let files = [fd("a.txt"), fd("b.txt")];
+        let starts = [0usize, 5];
+        let doc = vec![
+            row(RowKind::File, None, None),         // 0
+            row(RowKind::Hunk, None, None),         // 1
+            row(RowKind::Context, Some(1), Some(1)), // 2
+            row(RowKind::Remove, Some(2), None),    // 3
+            row(RowKind::Add, None, Some(2)),       // 4
+            row(RowKind::File, None, None),         // 5
+            row(RowKind::Hunk, None, None),         // 6
+            row(RowKind::Context, Some(1), Some(1)), // 7
+            row(RowKind::Hunk, None, None),         // 8
+            row(RowKind::Add, None, Some(9)),       // 9
+        ];
+        let anchor = |path: &str, target| Anchor { path: path.into(), target, screen_off: 0 };
+        // A new-side line number resolves within its file.
+        assert_eq!(resolve_anchor_row(&files, &starts, &doc, &anchor("b.txt", AnchorTarget::Line(None, Some(9)))), 9);
+        // A removed line (no new_no) falls back to old_no.
+        assert_eq!(resolve_anchor_row(&files, &starts, &doc, &anchor("a.txt", AnchorTarget::Line(Some(2), None))), 3);
+        // The nth hunk within a file (b.txt's second hunk is doc row 8).
+        assert_eq!(resolve_anchor_row(&files, &starts, &doc, &anchor("b.txt", AnchorTarget::Hunk(1))), 8);
+        // Start anchors to the file's header row.
+        assert_eq!(resolve_anchor_row(&files, &starts, &doc, &anchor("b.txt", AnchorTarget::Start)), 5);
+        // An unmatched line falls back to the file header.
+        assert_eq!(resolve_anchor_row(&files, &starts, &doc, &anchor("a.txt", AnchorTarget::Line(None, Some(999)))), 0);
+        // A vanished file falls back to the top of the document.
+        assert_eq!(resolve_anchor_row(&files, &starts, &doc, &anchor("gone.txt", AnchorTarget::Start)), 0);
     }
 
     #[test]
