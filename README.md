@@ -58,6 +58,7 @@ Some flags worth knowing:
 | Key | Action |
 |-----|--------|
 | `j` `k` / `↑` `↓` | Move the cursor |
+| `h` `l` / `←` `→` | Scroll horizontally (for lines wider than the view) |
 | `^d` `^u` | Half page down / up |
 | `g` `G` | Top / bottom |
 | `{` `}` | Previous / next hunk |
@@ -89,7 +90,8 @@ diffv is fully mouse-driven too:
 - Drag across the diff to select text; it lands on your system clipboard (over
   SSH too, via OSC 52). In split view the selection stays within one pane, so
   you copy just the old or just the new side.
-- Scroll wheel moves through the diff.
+- Scroll wheel moves the page through the diff (the cursor stays put until it
+  reaches an edge). Scroll the wheel left/right to pan wide lines horizontally.
 
 ## Themes
 

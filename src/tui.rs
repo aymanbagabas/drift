@@ -339,6 +339,9 @@ pub struct App {
     scroll: usize,
     /// Selected/highlighted row within the diff (tig-style cursor line).
     cursor: usize,
+    /// Horizontal scroll offset in display columns; the gutter and +/- sign
+    /// stay pinned while the line content shifts left by this many columns.
+    hscroll: usize,
     view: View,
     /// Left file-list sidebar override: `None` follows the auto rule (open when
     /// the terminal is >= 150 cells wide), `Some(_)` is the user's toggle.
@@ -429,6 +432,7 @@ impl App {
             selected: 0,
             scroll: 0,
             cursor: 0,
+            hscroll: 0,
             view: View::Diff,
             sidebar: None,
             sidebar_width: None,
@@ -692,6 +696,7 @@ impl App {
     fn help_entries() -> &'static [(&'static str, &'static str)] {
         &[
             ("j/k ↑/↓", "move"),
+            ("h/l ←/→", "scroll x"),
             ("^d/^u", "half page"),
             ("g/G", "top/bottom"),
             ("{ }", "prev/next hunk"),
@@ -738,6 +743,61 @@ impl App {
     fn scroll_by(&mut self, delta: isize) {
         let max = self.max_scroll() as isize;
         self.scroll = (self.scroll as isize + delta).clamp(0, max) as usize;
+    }
+
+    /// Scroll the viewport by `delta` rows and drag the cursor along only when
+    /// an edge would push past it, so the cursor stays pinned in the document
+    /// until it clips at the top/bottom of the window (mouse-wheel paging).
+    fn scroll_page(&mut self, delta: isize) {
+        if self.rows().is_empty() {
+            return;
+        }
+        self.scroll_by(delta);
+        let vh = self.viewport_rows();
+        let last = self.rows().len() - 1;
+        let bottom = (self.scroll + vh).saturating_sub(1).min(last);
+        self.cursor = self.cursor.clamp(self.scroll, bottom);
+        self.selected = self.file_at(self.cursor);
+    }
+
+    /// Columns available for line content: the terminal width minus the
+    /// sidebar, the line-number gutter, and the +/- sign. In split view a line
+    /// lives inside one half-width pane (with the narrower per-side gutter), so
+    /// use the smaller pane's content width — that's what a line must scroll
+    /// within, and it lets the widest line reveal fully in either pane.
+    fn content_view_w(&self) -> u16 {
+        let body = self.screen.width().saturating_sub(self.sidebar_w());
+        if self.split {
+            let left = self.split_left_w(body);
+            let right = body.saturating_sub(left + 1);
+            left.min(right)
+                .saturating_sub(self.content_start(RowKind::Context, Gut::Old))
+        } else {
+            body.saturating_sub(self.content_start(RowKind::Context, Gut::Both))
+        }
+    }
+
+    /// Furthest the content can scroll left: the widest content among the rows
+    /// currently on screen, minus the visible content width. Recomputed per
+    /// scroll tick (bounded by the viewport height, so cheap).
+    fn max_hscroll(&self) -> usize {
+        let vh = self.viewport_rows();
+        let widest = self
+            .rows()
+            .iter()
+            .skip(self.scroll)
+            .take(vh)
+            .map(|r| r.content.len())
+            .max()
+            .unwrap_or(0);
+        widest.saturating_sub(self.content_view_w() as usize)
+    }
+
+    /// Scroll the line content horizontally by `delta` columns, clamped so it
+    /// never scrolls past the widest visible line or before column 0.
+    fn scroll_h(&mut self, delta: isize) {
+        let max = self.max_hscroll() as isize;
+        self.hscroll = (self.hscroll as isize + delta).clamp(0, max) as usize;
     }
 
     /// Width of the line-number gutter for a pane, matching what
@@ -884,7 +944,7 @@ impl App {
         let row = (self.scroll + y as usize).min(rows.len() - 1);
         let (origin, cs) = self.pane_geom(rows[row].kind, pane);
         let len = rows[row].content.len();
-        let col = (x.saturating_sub(origin + cs) as usize).min(len);
+        let col = (x.saturating_sub(origin + cs) as usize + self.hscroll).min(len);
         (row, col)
     }
 
@@ -1050,9 +1110,12 @@ impl App {
     }
 
     fn goto_match(&mut self, i: usize) {
-        if let Some(&(row, _, _)) = self.matches.get(i) {
+        if let Some(&(row, cs, ce)) = self.matches.get(i) {
             self.match_i = Some(i);
             self.set_cursor(row);
+            // Pan horizontally so the hit is on screen.
+            let vw = self.content_view_w() as usize;
+            self.hscroll = reveal(self.hscroll, cs, ce, vw).min(self.max_hscroll());
         }
     }
 
@@ -1314,6 +1377,10 @@ impl App {
                     self.move_cursor(1);
                 } else if k.matches_any(["k", "up"]) {
                     self.move_cursor(-1);
+                } else if k.matches_any(["h", "left"]) {
+                    self.scroll_h(-4);
+                } else if k.matches_any(["l", "right"]) {
+                    self.scroll_h(4);
                 } else if k.matches_any(["ctrl+d", "pagedown", "space"]) {
                     self.move_cursor(page / 2);
                 } else if k.matches_any(["ctrl+u", "pageup"]) {
@@ -1362,10 +1429,12 @@ impl App {
             Event::MouseWheel(m) => {
                 // Scrolling moves content under any selection, so drop it.
                 self.sel = None;
-                if m.button == MouseButton::WheelUp {
-                    self.move_cursor(-3);
-                } else if m.button == MouseButton::WheelDown {
-                    self.move_cursor(3);
+                match m.button {
+                    MouseButton::WheelUp => self.scroll_page(-3),
+                    MouseButton::WheelDown => self.scroll_page(3),
+                    MouseButton::WheelLeft => self.scroll_h(-3),
+                    MouseButton::WheelRight => self.scroll_h(3),
+                    _ => {}
                 }
             }
             Event::MouseClick(m) => {
@@ -1492,6 +1561,7 @@ impl App {
                 self.sel = None;
                 self.screen.resize((ws.col, ws.row));
                 self.move_cursor(0);
+                self.scroll_h(0);
             }
             _ => {}
         }
@@ -1614,6 +1684,7 @@ impl App {
         };
         let body_h = self.viewport_rows();
         let scroll = self.scroll;
+        let hs = self.hscroll as u16;
         let (sr, sc, er, ec) = sel.ordered();
         // Compute the on-screen highlight span for each visible selected row up
         // front, so the immutable row borrow is released before we touch cells.
@@ -1634,8 +1705,12 @@ impl App {
                 let len = row.content.len() as u16;
                 let start = if r == sr { sc as u16 } else { 0 };
                 let end = if r == er { ec as u16 } else { len };
-                let sx = (cs + start.min(len)).min(right);
-                let ex = (cs + end.min(len)).min(right);
+                // Map content columns to screen columns through the horizontal
+                // scroll: anything left of `hscroll` is off-screen.
+                let s0 = start.min(len).max(hs);
+                let e0 = end.min(len).max(hs);
+                let sx = (cs + (s0 - hs)).min(right);
+                let ex = (cs + (e0 - hs)).min(right);
                 if ex > sx {
                     segs.push(((r - scroll) as u16, sx, ex));
                 }
@@ -1663,6 +1738,7 @@ impl App {
         let body_right = if self.sidebar_left() { w } else { w - sw };
         let body_h = self.viewport_rows();
         let scroll = self.scroll;
+        let hs = self.hscroll as u16;
         let split = self.split;
         let div = self.split_div_x();
         // (y, sx, ex, current) computed while rows are borrowed immutably.
@@ -1694,8 +1770,8 @@ impl App {
                     } else {
                         body_right
                     };
-                    let sx = (base + (cstart as u16).min(len)).min(right);
-                    let ex = (base + (cend as u16).min(len)).min(right);
+                    let sx = (base + (cstart as u16).min(len).max(hs) - hs).min(right);
+                    let ex = (base + (cend as u16).min(len).max(hs) - hs).min(right);
                     if ex > sx {
                         segs.push((y, sx, ex, cur));
                     }
@@ -2242,19 +2318,19 @@ impl App {
             RowKind::Remove => ("-", &self.theme.remove, self.theme.remove.clone().bold()),
             RowKind::Context => (" ", &self.theme.context, self.theme.context.clone()),
             RowKind::File => {
-                let (s, _) = self.clip(&r.spans[0].text, width);
+                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.screen
                     .set_str((cx, y), &s, bg(self.theme.header.clone().bold()));
                 return;
             }
             RowKind::Hunk => {
-                let (s, _) = self.clip(&r.spans[0].text, width);
+                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.screen
                     .set_str((cx, y), &s, bg(self.theme.header.clone()));
                 return;
             }
             RowKind::Note => {
-                let (s, _) = self.clip(&r.spans[0].text, width);
+                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.screen
                     .set_str((cx, y), &s, bg(self.theme.context.clone().faint()));
                 return;
@@ -2269,12 +2345,25 @@ impl App {
             _ => None,
         };
         let avail = x + width;
+        let content_x0 = cx;
+        let hs = self.hscroll as u16;
+        // Content column where the current span begins. The gutter and sign are
+        // pinned; only the spans past `content_x0` shift left by `hscroll`.
+        let mut vcol: u16 = 0;
         for span in &r.spans {
-            if cx >= avail {
+            let spanw = self.width(&span.text);
+            let screen_x = content_x0 + vcol.saturating_sub(hs);
+            if screen_x >= avail {
                 break;
             }
-            let remaining = (avail - cx) as usize;
-            let (text, cw) = self.clip(&span.text, remaining as u16);
+            let skip = hs.saturating_sub(vcol);
+            if skip >= spanw {
+                vcol += spanw;
+                continue;
+            }
+            let remaining = avail - screen_x;
+            let (text, _) = self.slice_h(&span.text, skip, remaining);
+            vcol += spanw;
             if text.is_empty() {
                 continue;
             }
@@ -2288,8 +2377,7 @@ impl App {
                     style = style.bg(bgc).bold();
                 }
             }
-            self.screen.set_str((cx, y), &text, bg(style));
-            cx += cw;
+            self.screen.set_str((screen_x, y), &text, bg(style));
         }
     }
 
@@ -2302,6 +2390,14 @@ impl App {
     /// policy so a cell budget matches what `set_str` actually paints.
     fn clip(&self, s: &str, width: u16) -> (String, u16) {
         fit(self.screen.grapheme_cells(s), width)
+    }
+
+    /// Like [`Self::clip`] but first drops `skip` leading display columns, so a
+    /// line can be scrolled horizontally. A wide cluster straddling the left
+    /// edge is dropped whole (never split). Returns the slice and its width; at
+    /// `skip == 0` it is identical to `clip`.
+    fn slice_h(&self, s: &str, skip: u16, width: u16) -> (String, u16) {
+        slice_fit(self.screen.grapheme_cells(s), skip, width)
     }
 
     /// Display width of `s` in terminal columns under the screen's width mode.
@@ -2569,6 +2665,45 @@ fn fit<'a>(cells: impl Iterator<Item = (&'a str, u8)>, width: u16) -> (String, u
     (out, w)
 }
 
+/// New horizontal scroll that brings the column range `[cs, ce)` into a view
+/// `vw` columns wide: scroll left if the hit starts before the view, right if
+/// it runs past it (favouring the start when the hit is wider than the view).
+/// Returns the current offset unchanged when the hit already fits on screen.
+fn reveal(hscroll: usize, cs: usize, ce: usize, vw: usize) -> usize {
+    if cs < hscroll {
+        cs
+    } else if ce > hscroll + vw {
+        ce.saturating_sub(vw).min(cs)
+    } else {
+        hscroll
+    }
+}
+
+/// Fit `(cluster, width)` pairs into at most `width` columns after skipping
+/// `skip` leading columns, without splitting a wide cluster. A cluster that
+/// straddles the `skip` boundary is dropped whole. Returns the fitted string
+/// and the columns it occupies. At `skip == 0` this equals [`fit`].
+fn slice_fit<'a>(cells: impl Iterator<Item = (&'a str, u8)>, skip: u16, width: u16) -> (String, u16) {
+    let mut out = String::new();
+    let mut col = 0u16;
+    let mut w = 0u16;
+    for (g, gw) in cells {
+        let gw = gw as u16;
+        if col < skip {
+            col += gw;
+            continue;
+        }
+        if w + gw > width {
+            break;
+        }
+        out.push_str(g);
+        w += gw;
+        col += gw;
+    }
+    (out, w)
+}
+
+
 /// Take clusters from the end of `cells` that fit in `budget` columns, keeping
 /// the tail intact without splitting a wide cluster. Used by `shorten`.
 fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
@@ -2587,7 +2722,7 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, slice_cells, text_cells, Sel, Span};
+    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, Sel, Span};
     use regex::RegexBuilder;
     use uncurses::text::{grapheme_cells, WidthMode};
 
@@ -2595,6 +2730,37 @@ mod tests {
     // screen, so we feed grapheme_cells directly here.
     fn clip(s: &str, width: u16) -> (String, u16) {
         fit(grapheme_cells(s, WidthMode::Grapheme, false), width)
+    }
+
+    fn slice_h(s: &str, skip: u16, width: u16) -> (String, u16) {
+        slice_fit(grapheme_cells(s, WidthMode::Grapheme, false), skip, width)
+    }
+
+    #[test]
+    fn reveal_pans_to_show_a_match() {
+        // Already visible: unchanged.
+        assert_eq!(reveal(0, 5, 10, 72), 0);
+        assert_eq!(reveal(4, 5, 10, 72), 4);
+        // Hit before the view: scroll left to its start.
+        assert_eq!(reveal(20, 5, 10, 72), 5);
+        // Hit past the right edge: scroll right just enough to show its end.
+        assert_eq!(reveal(0, 100, 108, 72), 108 - 72);
+        // Hit wider than the view: favour showing its start.
+        assert_eq!(reveal(0, 100, 200, 72), 100);
+    }
+
+    #[test]
+    fn slice_h_skips_columns_and_matches_clip_at_zero() {
+        // At skip 0 it must be byte-identical to clip.
+        assert_eq!(slice_h("hello world", 0, 5), clip("hello world", 5));
+        // Skipping drops leading columns, then fits the budget.
+        assert_eq!(slice_h("hello world", 6, 5), ("world".into(), 5));
+        assert_eq!(slice_h("hello world", 3, 4), ("lo w".into(), 4));
+        // Skipping past the end yields nothing.
+        assert_eq!(slice_h("abc", 10, 5), (String::new(), 0));
+        // A wide cluster straddling the skip boundary is dropped whole, never
+        // split: "世界" is two 2-col clusters, skip=1 lands mid-"世".
+        assert_eq!(slice_h("世界", 1, 4), ("界".into(), 2));
     }
 
     fn sel(a_row: usize, a_col: usize, c_row: usize, c_col: usize) -> Sel {
