@@ -14,7 +14,7 @@ use uncurses::cell::Cell;
 use uncurses::color::Color;
 use uncurses::event::{Event, Key, KeyModifiers, MouseButton};
 use uncurses::screen::{MouseTracking, Screen, ScreenOptions};
-use uncurses::style::Style;
+use uncurses::style::{AttrFlags, Style};
 use uncurses::terminal::{TtyInput, TtyOutput};
 use uncurses::text::{grapheme_cells, TextSurface, WidthMode};
 
@@ -68,6 +68,11 @@ struct Theme {
     // accent palette so every theme gets it without per-theme tuning.
     search_match: Style,
     search_current: Style,
+    /// Idle-mascot colours: filled body, antenna/reaction accent, and the dark
+    /// face glyphs drawn on top of the body.
+    mascot_body: Color,
+    mascot_accent: Color,
+    mascot_face: Color,
 }
 
 impl Theme {
@@ -107,6 +112,9 @@ impl Theme {
             sidebar_border: sty("sidebar-border", "surface"),
             search_match: sty("search-match", "background secondary bold"),
             search_current: sty("search-current", "background primary bold"),
+            mascot_body: pal.color("primary").unwrap_or(Color::Indexed(99)),
+            mascot_accent: pal.color("secondary").unwrap_or(Color::Indexed(75)),
+            mascot_face: pal.color("background").unwrap_or(Color::Indexed(0)),
         }
     }
 }
@@ -206,6 +214,381 @@ impl Sel {
         self.a_row == self.c_row && self.a_col == self.c_col
     }
 }
+
+/// Mascot bounding box in cells: an 11-wide Space-Invaders–style alien monster
+/// (like 👾) drawn purely with half-blocks (two vertical pixels per cell) —
+/// horns, a wide head with two eyes, side arms, and legs. Its two arcade walk
+/// frames alternate for an idle wiggle. Height is fixed so movement and poke
+/// hit-testing stay stable.
+const MASCOT_W: u16 = 11;
+const MASCOT_H: u16 = 4;
+
+/// The mascot's current expression, drawn as eye pixels (no letters, no mouth —
+/// like the 👾 emoji). Idle moods (Normal/Happy/Wink/Look/Squint/Cool/Curious)
+/// are rolled at random and held briefly; Blink flickers over any of them;
+/// poke/drag force Surprised and Dizzy.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Face {
+    Normal,
+    Blink,
+    Happy,
+    Wink,
+    Look,
+    Squint,
+    Cool,
+    Curious,
+    Surprised,
+    Dizzy,
+}
+
+impl Face {
+    /// The idle moods that get rolled at random (never the event-driven ones).
+    /// Weighted by repetition so Normal shows most often.
+    const IDLE: [Face; 10] = [
+        Face::Normal,
+        Face::Normal,
+        Face::Normal,
+        Face::Happy,
+        Face::Happy,
+        Face::Wink,
+        Face::Look,
+        Face::Squint,
+        Face::Cool,
+        Face::Curious,
+    ];
+}
+
+/// The idle-screen mascot: a little antenna'd bot that drifts around the empty
+/// diff body, breathes (its belly puffs in and out), and makes a surprised face
+/// for a moment when poked. Purely decorative — it exists only while there are
+/// no changes to show.
+struct Mascot {
+    /// Top-left of the sprite, in body cells (fractional for smooth drift).
+    x: f32,
+    y: f32,
+    /// Drift velocity in cells/second, re-rolled at every `next_turn`.
+    vx: f32,
+    vy: f32,
+    born: Instant,
+    last: Instant,
+    next_turn: Instant,
+    poke_until: Option<Instant>,
+    /// True while the user is dragging it: drift pauses and it follows the
+    /// pointer instead.
+    dragging: bool,
+    /// Recent horizontal drag direction, negated so the limbs trail *opposite*
+    /// the drag; decays back to 0 once you let go.
+    lean: f32,
+    /// xorshift64 state (seeded from the wall clock) for the random walk.
+    rng: u64,
+    /// Current idle expression and when to roll the next one; `mood_side` picks
+    /// the direction for sided faces (wink/glance).
+    mood: Face,
+    mood_until: Instant,
+    mood_side: i16,
+}
+
+impl Mascot {
+    fn new(bw: u16, bh: u16) -> Self {
+        let now = Instant::now();
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e37_79b9_7f4a_7c15)
+            | 1;
+        let mut m = Mascot {
+            x: (bw.saturating_sub(MASCOT_W) / 2) as f32,
+            y: (bh.saturating_sub(MASCOT_H) / 2) as f32,
+            vx: 0.0,
+            vy: 0.0,
+            born: now,
+            last: now,
+            next_turn: now,
+            poke_until: None,
+            dragging: false,
+            lean: 0.0,
+            rng: seed,
+            mood: Face::Normal,
+            mood_until: now,
+            mood_side: 1,
+        };
+        m.turn();
+        m.roll_mood();
+        m
+    }
+
+    /// xorshift64 mapped to `[0, 1)`.
+    fn rand(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        ((x >> 40) as f32) / ((1u32 << 24) as f32)
+    }
+
+    /// Roll a fresh drift and schedule the next course change (0.6–1.8s out).
+    /// Uses a random *heading* with a guaranteed minimum speed so it never rolls
+    /// a near-zero velocity and appears to freeze mid-screen.
+    fn turn(&mut self) {
+        let (a, b, c) = (self.rand(), self.rand(), self.rand());
+        let angle = a * std::f32::consts::TAU;
+        let speed = 3.0 + b * 4.0; // ~[3, 7] cells/s — always visibly moving
+        self.vx = angle.cos() * speed;
+        self.vy = angle.sin() * speed * 0.6; // flatten vertical drift a touch
+        self.next_turn = Instant::now() + Duration::from_millis(600 + (c * 1200.0) as u64);
+    }
+
+    /// Pick the next idle expression at random and hold it ~1.2–3s. Sided faces
+    /// (wink/glance) also get a random left/right bias.
+    fn roll_mood(&mut self) {
+        let (a, b, c) = (self.rand(), self.rand(), self.rand());
+        self.mood = Face::IDLE[(a * Face::IDLE.len() as f32) as usize % Face::IDLE.len()];
+        self.mood_side = if b < 0.5 { -1 } else { 1 };
+        self.mood_until = Instant::now() + Duration::from_millis(1200 + (c * 1800.0) as u64);
+    }
+
+    /// Advance the drift within a `bw`×`bh` body, bouncing off the edges. While
+    /// being dragged it only settles its limbs; the pointer sets its position.
+    fn tick(&mut self, bw: u16, bh: u16) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
+        self.last = now;
+        self.lean *= 0.75_f32.powf(dt / 0.05); // ease limbs back to rest
+        if self.dragging {
+            return; // held: follows the pointer, so no drift
+        }
+        if now >= self.next_turn {
+            self.turn();
+        }
+        if now >= self.mood_until {
+            self.roll_mood();
+        }
+        self.x += self.vx * dt;
+        self.y += self.vy * dt;
+        let (maxx, maxy) = (
+            bw.saturating_sub(MASCOT_W) as f32,
+            bh.saturating_sub(MASCOT_H) as f32,
+        );
+        if self.x < 0.0 {
+            self.x = 0.0;
+            self.vx = -self.vx;
+        } else if self.x > maxx {
+            self.x = maxx;
+            self.vx = -self.vx;
+        }
+        if self.y < 0.0 {
+            self.y = 0.0;
+            self.vy = -self.vy;
+        } else if self.y > maxy {
+            self.y = maxy;
+            self.vy = -self.vy;
+        }
+    }
+
+    /// Bounding box in body cells: (col0, row0, col1, row1), ends exclusive.
+    fn bbox(&self) -> (u16, u16, u16, u16) {
+        let (x, y) = (self.x.round() as u16, self.y.round() as u16);
+        (x, y, x + MASCOT_W, y + MASCOT_H)
+    }
+
+    /// React to a poke: surprised face for a moment, then dart off.
+    fn poke(&mut self) {
+        self.poke_until = Some(Instant::now() + Duration::from_millis(700));
+        self.turn();
+        self.vx *= 1.8;
+        self.vy *= 1.8;
+    }
+
+    fn grab(&mut self) {
+        self.dragging = true;
+    }
+
+    /// Let go: resume drifting from a fresh random heading.
+    fn release(&mut self) {
+        self.dragging = false;
+        self.turn();
+    }
+
+    /// Move to a dragged top-left `(tx, ty)` (body cells), clamped in-bounds,
+    /// leaning the limbs opposite the horizontal motion.
+    fn drag_to(&mut self, tx: f32, ty: f32, bw: u16, bh: u16) {
+        self.lean = -(tx - self.x).clamp(-1.5, 1.5);
+        let (maxx, maxy) = (
+            bw.saturating_sub(MASCOT_W) as f32,
+            bh.saturating_sub(MASCOT_H) as f32,
+        );
+        self.x = tx.clamp(0.0, maxx);
+        self.y = ty.clamp(0.0, maxy);
+    }
+
+    /// How far to shift the antenna/limb rows (in cells) relative to the body,
+    /// so they trail opposite the drag. −1, 0, or +1.
+    fn lean_offset(&self) -> i16 {
+        if self.lean > 0.4 {
+            1
+        } else if self.lean < -0.4 {
+            -1
+        } else {
+            0
+        }
+    }
+
+    /// Which of the two arcade walk frames to show right now; alternating them
+    /// makes the alien wiggle in place. Toggles a bit under a second.
+    fn stride(&self) -> bool {
+        (self.born.elapsed().as_secs_f32() / 0.7) as u64 % 2 == 0
+    }
+
+    /// Whether a poke flash is active (used to pop the body colour).
+    fn flashing(&self) -> bool {
+        self.poke_until.is_some_and(|u| Instant::now() < u)
+    }
+
+    /// Which way the eyes glance while drifting, so it looks where it's going.
+    fn gaze(&self) -> i16 {
+        if self.vx > 1.0 {
+            1
+        } else if self.vx < -1.0 {
+            -1
+        } else {
+            0
+        }
+    }
+
+    /// The current expression. Dragging looks dizzy, a poke is surprised, and
+    /// otherwise it wears its current idle mood with an occasional blink
+    /// flickering over the top.
+    fn face(&self) -> Face {
+        if self.dragging {
+            return Face::Dizzy;
+        }
+        if self.flashing() {
+            return Face::Surprised;
+        }
+        let t = self.born.elapsed().as_millis() as u64;
+        if t % 4200 < 160 {
+            return Face::Blink;
+        }
+        self.mood
+    }
+
+    /// Stamp one face pixel (face/accent material) at grid `(r, c)`, ignoring
+    /// out-of-range coordinates.
+    fn stamp(grid: &mut [[u8; MASCOT_W as usize]], r: usize, c: i16, m: u8) {
+        if r < grid.len() && (0..MASCOT_W as i16).contains(&c) {
+            grid[r][c as usize] = m;
+        }
+    }
+
+    /// The mascot as a material bitmap, two vertical pixels per rendered cell.
+    /// Bytes: `.` transparent, `B` body, `A` accent (dizzy eyes), `D` eyes. It's
+    /// the Space-Invaders alien: two authentic arcade walk frames alternate for
+    /// an idle wiggle, the horns/legs sway opposite a drag, and — like the 👾
+    /// emoji — the expression lives entirely in the eyes (no mouth). Rendered
+    /// with half-blocks.
+    fn frame(&self) -> Vec<[u8; MASCOT_W as usize]> {
+        const W: usize = MASCOT_W as usize;
+        // The two canonical Space-Invaders "crab" walk frames, as solid bodies.
+        let frame_a: [&[u8; W]; 8] = [
+            b"..B.....B..",
+            b"B..B...B..B",
+            b"B.BBBBBBB.B",
+            b"BBBBBBBBBBB",
+            b"BBBBBBBBBBB",
+            b".BBBBBBBBB.",
+            b"..B.....B..",
+            b".B.......B.",
+        ];
+        let frame_b: [&[u8; W]; 8] = [
+            b"..B.....B..",
+            b"...B...B...",
+            b"..BBBBBBB..",
+            b".BBBBBBBBB.",
+            b"BBBBBBBBBBB",
+            b"B.BBBBBBB.B",
+            b"B.B.....B.B",
+            b"...BB.BB...",
+        ];
+        // The two arcade walk frames alternate to give an idle wiggle.
+        let src = if self.stride() { frame_a } else { frame_b };
+
+        // Rows 0-1 (horns) and 6-7 (legs/feet) are the limbs: they slide
+        // opposite the drag; the core body stays put.
+        let lean = self.lean_offset();
+        let mut g: Vec<[u8; W]> = Vec::with_capacity(8);
+        for (r, row) in src.iter().enumerate() {
+            let limb = matches!(r, 0 | 1 | 6 | 7);
+            let mut out = [b'.'; W];
+            for (c, &b) in row.iter().enumerate() {
+                if b == b'B' {
+                    let dc = if limb { c as i16 + lean } else { c as i16 };
+                    if (0..W as i16).contains(&dc) {
+                        out[dc as usize] = b'B';
+                    }
+                }
+            }
+            g.push(out);
+        }
+
+        // Eyes at columns 3 and 7; expression is all in the eyes.
+        let (lc, rc) = (3i16, 7i16);
+        match self.face() {
+            Face::Blink => {} // shut: the body closes over them
+            Face::Surprised => {
+                for c in [lc, rc] {
+                    Self::stamp(&mut g, 3, c, b'D');
+                    Self::stamp(&mut g, 4, c, b'D'); // wide-open
+                }
+            }
+            Face::Dizzy => {
+                for c in [lc, rc] {
+                    Self::stamp(&mut g, 3, c, b'A');
+                    Self::stamp(&mut g, 4, c, b'A'); // accent-coloured daze
+                }
+            }
+            Face::Happy => {
+                for c in [lc, rc] {
+                    Self::stamp(&mut g, 2, c, b'D'); // raised, cheerful
+                }
+            }
+            Face::Wink => {
+                // One eye open, the other shut (side chosen by mood_side).
+                let (open, _shut) = if self.mood_side < 0 { (rc, lc) } else { (lc, rc) };
+                Self::stamp(&mut g, 3, open, b'D');
+            }
+            Face::Look => {
+                // A steady sidelong glance, both eyes shifted together.
+                let z = self.mood_side;
+                Self::stamp(&mut g, 3, lc + z, b'D');
+                Self::stamp(&mut g, 3, rc + z, b'D');
+            }
+            Face::Squint => {
+                // Eyes drawn inward for a suspicious, narrowed look.
+                Self::stamp(&mut g, 3, lc + 1, b'D');
+                Self::stamp(&mut g, 3, rc - 1, b'D');
+            }
+            Face::Cool => {
+                // A horizontal visor bar — shades on.
+                for c in lc..=rc {
+                    Self::stamp(&mut g, 3, c, b'D');
+                }
+            }
+            Face::Curious => {
+                // Wide, high, spread-apart eyes: intrigued.
+                Self::stamp(&mut g, 2, lc - 1, b'D');
+                Self::stamp(&mut g, 2, rc + 1, b'D');
+            }
+            Face::Normal => {
+                let z = self.gaze();
+                Self::stamp(&mut g, 3, lc + z, b'D');
+                Self::stamp(&mut g, 3, rc + z, b'D');
+            }
+        }
+        g
+    }
+}
+
 
 /// The printable text a key produces (glyph, so uppercase and shifted symbols
 /// come through), or None for control/named keys and modifier chords, for
@@ -385,6 +768,15 @@ pub struct App {
     /// Raw diff text last applied, so the worktree poll only rebuilds when the
     /// unstaged diff actually changed (avoids jarring scroll resets on idle).
     last_diff: String,
+    /// Idle-screen mascot, lazily created while there are no changes to show
+    /// and cleared as soon as a diff appears.
+    mascot: Option<Mascot>,
+    /// Grab offset into the mascot's bounding box while it's being dragged.
+    mascot_grab: Option<(u16, u16)>,
+    /// Force the mascot to appear over the diff, toggled by tapping Esc thrice.
+    mascot_pinned: bool,
+    /// Timestamps of recent Esc taps, for detecting the triple-tap toggle.
+    esc_taps: (u8, Option<Instant>),
 }
 
 impl App {
@@ -452,6 +844,10 @@ impl App {
             sel: None,
             flash: None,
             last_diff: String::new(),
+            mascot: None,
+            mascot_grab: None,
+            mascot_pinned: false,
+            esc_taps: (0, None),
         };
         app.start();
         Ok(app)
@@ -1201,6 +1597,11 @@ impl App {
             if self.watch && self.source.reads_worktree() {
                 timeout = timeout.min(poll.max(Duration::from_millis(1)));
             }
+            // Keep the mascot animating smoothly (breathing, drift, poke)
+            // whenever it's on screen — idle, or pinned over a diff.
+            if self.files.is_empty() || self.mascot_pinned {
+                timeout = timeout.min(Duration::from_millis(80));
+            }
             if self.screen.poll_event(Some(timeout))? {
                 // Drain every queued event before the next render so bursts
                 // (held keys, fast scrolling, paste) stay responsive.
@@ -1312,6 +1713,16 @@ impl App {
                 // It never quits and never touches help (help is a toggle-only
                 // inline footer, closed with `?`).
                 if k.matches("escape") {
+                    // Three Esc taps in quick succession (<600ms apart) toggle
+                    // the mascot on over any view — even when there are changes.
+                    let now = Instant::now();
+                    let recent = self.esc_taps.1.is_some_and(|t| now.duration_since(t) < Duration::from_millis(600));
+                    self.esc_taps = (if recent { self.esc_taps.0 + 1 } else { 1 }, Some(now));
+                    if self.esc_taps.0 >= 3 {
+                        self.mascot_pinned = !self.mascot_pinned;
+                        self.esc_taps = (0, None);
+                        return Ok(false);
+                    }
                     if self.sel.is_some() {
                         self.sel = None;
                     } else if !self.query.is_empty() {
@@ -1447,6 +1858,12 @@ impl App {
                     self.help_open = !self.help_open;
                     return Ok(false);
                 }
+                // The "diffv" logo badge toggles the mascot from any view
+                // (same as tapping Esc three times).
+                if m.y == footer_row && m.x < self.width(" diffv ") {
+                    self.mascot_pinned = !self.mascot_pinned;
+                    return Ok(false);
+                }
                 // Stat modal: a click inside the box keeps it open (and selects
                 // the file row under the cursor, if any); only a click outside
                 // the box closes it.
@@ -1469,6 +1886,25 @@ impl App {
                     return Ok(false);
                 }
                 if self.view == View::Diff && !self.help_open {
+                    // The mascot is clickable whenever it's on screen (idle
+                    // screen, or pinned over a diff): a hit pokes it and starts
+                    // a drag. On the idle screen nothing else is clickable.
+                    if m.y < footer_row {
+                        let bx = self.body_x();
+                        if let Some(mascot) = self.mascot.as_mut() {
+                            let (x0, y0, x1, y1) = mascot.bbox();
+                            let cx = m.x.saturating_sub(bx);
+                            if cx >= x0 && cx < x1 && m.y >= y0 && m.y < y1 {
+                                mascot.poke();
+                                mascot.grab();
+                                self.mascot_grab = Some((cx - x0, m.y - y0));
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    if self.files.is_empty() {
+                        return Ok(false);
+                    }
                     let body_h = footer_row;
                     if m.y >= body_h {
                         // Footer area (not the help badge): ignore.
@@ -1519,7 +1955,18 @@ impl App {
                 // With button tracking (mode 1002) motion is only reported
                 // while a button is held, so any move during a drag extends the
                 // selection.
-                if let Some((gx, gy)) = self.modal_drag {
+                if let Some((gx, gy)) = self.mascot_grab {
+                    // Dragging the idle mascot: follow the pointer, keeping the
+                    // grab offset, and let it lean its antennas as it moves.
+                    let bx = self.body_x();
+                    let body_h = self.viewport_rows() as u16;
+                    let bw = self.screen.width().saturating_sub(self.sidebar_w());
+                    let tx = m.x.saturating_sub(bx).saturating_sub(gx) as f32;
+                    let ty = m.y.saturating_sub(gy) as f32;
+                    if let Some(mascot) = self.mascot.as_mut() {
+                        mascot.drag_to(tx, ty, bw, body_h);
+                    }
+                } else if let Some((gx, gy)) = self.modal_drag {
                     self.modal_pos = Some((m.x.saturating_sub(gx), m.y.saturating_sub(gy)));
                 } else if self.resizing {
                     self.resize_sidebar_to(m.x);
@@ -1548,6 +1995,11 @@ impl App {
                     self.resizing = false;
                     self.resizing_split = false;
                     self.modal_drag = None;
+                    if self.mascot_grab.take().is_some() {
+                        if let Some(mascot) = self.mascot.as_mut() {
+                            mascot.release();
+                        }
+                    }
                     if let Some(sel) = self.sel.as_mut() {
                         sel.dragging = false;
                         // A click with no drag selects nothing.
@@ -1819,10 +2271,17 @@ impl App {
         let sw = self.sidebar_w();
         let bx = self.body_x();
         let bw = w.saturating_sub(sw);
-        if self.split {
+        let empty = self.files.is_empty();
+        if empty {
+            // Body is blank; the mascot is painted last, above everything.
+        } else if self.split {
             self.render_split(bx, bw, body_h);
         } else {
             self.render_diff(bx, bw, body_h);
+        }
+        if !empty && !self.mascot_pinned {
+            self.mascot = None;
+            self.mascot_grab = None;
         }
         if sw > 0 {
             let sx = if self.sidebar_left() { 0 } else { w - sw };
@@ -1836,8 +2295,7 @@ impl App {
         if self.help_open {
             self.render_help_grid(footer_row + 1, h);
         }
-        // The stat modal floats above everything, footer and help included, so
-        // it must be drawn last.
+        // The stat modal floats above the footer and help.
         if self.view == View::Stat {
             self.render_stat_modal();
         }
@@ -1845,6 +2303,11 @@ impl App {
         self.paint_matches();
         if let Some(sel) = self.sel {
             self.paint_selection(sel);
+        }
+        // The mascot floats above absolutely everything — including selection
+        // and search highlights — so those overlays never recolour it.
+        if empty || self.mascot_pinned {
+            self.render_empty(bx, bw, body_h);
         }
         self.screen.render()
     }
@@ -2169,6 +2632,68 @@ impl App {
             &self.clip(&summary, inner_w).0,
             on_bg.bold(),
         );
+    }
+
+    /// Idle screen: no changes, so float the mascot around the empty body. The
+    /// mascot breathes, reacts to pokes, and can be dragged (see the mouse
+    /// handlers).
+    fn render_empty(&mut self, bx: u16, bw: u16, body_h: u16) {
+        if bw < MASCOT_W || body_h < MASCOT_H {
+            self.mascot = None;
+            return;
+        }
+        let m = self.mascot.get_or_insert_with(|| Mascot::new(bw, body_h));
+        m.tick(bw, body_h);
+
+        let body = self.theme.mascot_body;
+        let accent = self.theme.mascot_accent;
+        let face_fg = self.theme.mascot_face;
+        let flashing = m.flashing();
+        let mat = |c: u8| -> Option<Color> {
+            match c {
+                b'B' => Some(if flashing { accent } else { body }),
+                b'A' => Some(if flashing { body } else { accent }),
+                b'D' => Some(face_fg),
+                _ => None,
+            }
+        };
+        let grid = m.frame();
+        let (ox, oy) = (m.x.round() as u16, m.y.round() as u16);
+
+        // Each rendered cell packs two vertical pixels via a half-block: the
+        // upper pixel is the fg of `▀`, the lower is its bg (or `▄`/space when
+        // one side is empty/solid). The whole creature — body, antennas, and
+        // face — is drawn this way, so there are no letter glyphs. When a half
+        // is transparent, we keep whatever background is already on the cell so
+        // the mascot floats over the diff without punching holes in it.
+        for r in 0..MASCOT_H as usize {
+            let top = grid.get(2 * r);
+            let bot = grid.get(2 * r + 1);
+            for col in 0..MASCOT_W as usize {
+                let tc = top.and_then(|row| mat(row[col]));
+                let bc = bot.and_then(|row| mat(row[col]));
+                let (px, py) = (bx + ox + col as u16, oy + r as u16);
+                // The cell's *visible* background: a reversed cell (e.g. under a
+                // selection) shows its fg as background, so swap when REVERSE is
+                // set. This keeps the mascot's transparent halves matching what's
+                // actually drawn behind it.
+                let under = self.screen.cell_mut((px, py)).and_then(|c| {
+                    if c.style.attrs.contains(AttrFlags::REVERSE) {
+                        c.style.fg
+                    } else {
+                        c.style.bg
+                    }
+                });
+                let (glyph, style) = match (tc, bc) {
+                    (None, None) => continue,
+                    (Some(c), None) => ("▀", Style::default().fg(c).bg(under)),
+                    (None, Some(c)) => ("▄", Style::default().fg(c).bg(under)),
+                    (Some(a), Some(b)) if a == b => (" ", Style::default().bg(a)),
+                    (Some(a), Some(b)) => ("▀", Style::default().fg(a).bg(b)),
+                };
+                self.screen.set_str((px, py), glyph, style);
+            }
+        }
     }
 
     fn render_diff(&mut self, x: u16, width: u16, body_h: u16) {
@@ -2722,7 +3247,7 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, Sel, Span};
+    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, Face, Mascot, Sel, Span, MASCOT_H, MASCOT_W};
     use regex::RegexBuilder;
     use uncurses::text::{grapheme_cells, WidthMode};
 
@@ -2734,6 +3259,35 @@ mod tests {
 
     fn slice_h(s: &str, skip: u16, width: u16) -> (String, u16) {
         slice_fit(grapheme_cells(s, WidthMode::Grapheme, false), skip, width)
+    }
+
+    #[test]
+    fn mascot_leans_opposite_the_drag_and_stays_in_bounds() {
+        let (bw, bh) = (40u16, 20u16);
+        let mut m = Mascot::new(bw, bh);
+        // Dragging right pushes lean negative, so the antennas trail left.
+        m.grab();
+        m.drag_to(m.x + 5.0, m.y, bw, bh);
+        assert_eq!(m.lean_offset(), -1, "antennas trail left when dragged right");
+        // Dragging left leans the other way.
+        m.drag_to(m.x - 5.0, m.y, bw, bh);
+        assert_eq!(m.lean_offset(), 1, "antennas trail right when dragged left");
+        // A drag far past the edge is clamped inside the body.
+        m.drag_to(1000.0, 1000.0, bw, bh);
+        let (bx0, by0, bx1, by1) = m.bbox();
+        assert!(bx1 <= bw && by1 <= bh, "clamped in bounds: {bx0},{by0},{bx1},{by1}");
+        assert_eq!(bx1 - bx0, MASCOT_W);
+        assert_eq!(by1 - by0, MASCOT_H);
+    }
+
+    #[test]
+    fn mascot_face_reacts_to_drag_and_poke() {
+        let mut m = Mascot::new(40, 20);
+        m.grab();
+        assert_eq!(m.face(), Face::Dizzy, "dragging looks dizzy");
+        m.release();
+        m.poke();
+        assert_eq!(m.face(), Face::Surprised, "a fresh poke looks surprised");
     }
 
     #[test]
