@@ -3073,7 +3073,14 @@ fn assemble_document(
 /// A `git diff`-style header row that introduces a file in the continuous
 /// document (renames show both paths, matching real unified-diff output).
 fn file_header_row(f: &FileDiff) -> Row {
-    let text = format!("diff --git a/{} b/{}", f.old_path, f.new_path);
+    // Git's `diff --git` line always carries the real filename on both sides,
+    // even for creates/deletes — the /dev/null sentinel only appears on the
+    // ---/+++ lines. Fall back to the display path so a new file doesn't render
+    // as "a//dev/null".
+    let real = f.path();
+    let a = if f.old_path == "/dev/null" || f.old_path.is_empty() { real } else { &f.old_path };
+    let b = if f.new_path == "/dev/null" || f.new_path.is_empty() { real } else { &f.new_path };
+    let text = format!("diff --git a/{a} b/{b}");
     Row::new(
         RowKind::File,
         None,
@@ -3348,6 +3355,25 @@ mod tests {
         // Unified view (None) selects every row kind.
         assert!(App::row_in_pane(RowKind::Add, None));
         assert!(App::row_in_pane(RowKind::Remove, None));
+    }
+
+    #[test]
+    fn file_header_uses_real_name_for_new_and_deleted_files() {
+        use crate::diff::FileDiff;
+        let fd = |old: &str, new: &str| FileDiff {
+            old_path: old.into(),
+            new_path: new.into(),
+            hunks: vec![],
+            is_binary: false,
+            notes: vec![],
+        };
+        let text = |f: &FileDiff| super::file_header_row(f).spans.iter().map(|s| s.text.clone()).collect::<String>();
+        // New file: old side is /dev/null, but the header must show the real name.
+        assert_eq!(text(&fd("/dev/null", "new.txt")), "diff --git a/new.txt b/new.txt");
+        // Deleted file: new side is /dev/null.
+        assert_eq!(text(&fd("old.txt", "/dev/null")), "diff --git a/old.txt b/old.txt");
+        // Rename keeps both distinct paths.
+        assert_eq!(text(&fd("from.txt", "to.txt")), "diff --git a/from.txt b/to.txt");
     }
 
     #[test]
