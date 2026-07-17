@@ -68,11 +68,10 @@ struct Theme {
     // accent palette so every theme gets it without per-theme tuning.
     search_match: Style,
     search_current: Style,
-    /// Idle-mascot colours: filled body, antenna/reaction accent, and the dark
-    /// face glyphs drawn on top of the body.
+    /// Idle-mascot colours: filled body and antenna/reaction accent. The face
+    /// glyphs (eyes) are always black, drawn on top of the body.
     mascot_body: Color,
     mascot_accent: Color,
-    mascot_face: Color,
 }
 
 impl Theme {
@@ -114,7 +113,6 @@ impl Theme {
             search_current: sty("search-current", "background primary bold"),
             mascot_body: pal.color("primary").unwrap_or(Color::Indexed(99)),
             mascot_accent: pal.color("secondary").unwrap_or(Color::Indexed(75)),
-            mascot_face: pal.color("background").unwrap_or(Color::Indexed(0)),
         }
     }
 }
@@ -2715,7 +2713,7 @@ impl App {
 
         let body = self.theme.mascot_body;
         let accent = self.theme.mascot_accent;
-        let face_fg = self.theme.mascot_face;
+        let face_fg = Color::Black; // eyes are always black
         let flashing = m.flashing();
         let mat = |c: u8| -> Option<Color> {
             match c {
