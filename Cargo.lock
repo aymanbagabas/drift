@@ -756,7 +756,7 @@ dependencies = [
 [[package]]
 name = "uncurses"
 version = "0.0.1"
-source = "git+https://github.com/aymanbagabas/uncurses#08fa8ab798fa5b00795b43716f4307714013653c"
+source = "git+https://github.com/aymanbagabas/uncurses#9566ac4e367a15e8e9fb098f70fed0f153500c39"
 dependencies = [
  "bitflags",
  "compact_str",
