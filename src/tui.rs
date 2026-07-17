@@ -2638,6 +2638,18 @@ impl App {
     /// mascot breathes, reacts to pokes, and can be dragged (see the mouse
     /// handlers).
     fn render_empty(&mut self, bx: u16, bw: u16, body_h: u16) {
+        // Faint centered "clean" note, only on the real empty screen (not when
+        // the mascot is pinned over a diff). Drawn first so the mascot floats
+        // over it.
+        if self.files.is_empty() {
+            let hint = "working tree clean";
+            let hw = self.width(hint);
+            if bw >= hw && body_h >= 1 {
+                let hx = bx + (bw - hw) / 2;
+                self.screen
+                    .set_str((hx, body_h - 1), hint, self.theme.context.clone().faint());
+            }
+        }
         if bw < MASCOT_W || body_h < MASCOT_H {
             self.mascot = None;
             return;
