@@ -1074,8 +1074,48 @@ impl App {
             .is_some_and(|r| r.kind == RowKind::Hunk)
     }
 
+    /// Content rows that fit below the sticky-header band: the physical body
+    /// height minus however many headers are currently pinned at the top.
     fn viewport_rows(&self) -> usize {
+        self.body_h_screen().saturating_sub(self.sticky_h())
+    }
+
+    /// Physical rows of the body region (everything above the footer/help
+    /// chrome), including the sticky-header band.
+    fn body_h_screen(&self) -> usize {
         (self.screen.height() as usize).saturating_sub(self.chrome_h())
+    }
+
+    /// Document rows pinned at the top of the body for the current scroll: the
+    /// enclosing file header and the current hunk header, but only once they've
+    /// scrolled above the top visible content line (so a header still naturally
+    /// on screen isn't duplicated). Capped to leave at least one content row.
+    fn sticky_rows(&self) -> Vec<usize> {
+        let rows = self.rows();
+        let kinds: Vec<RowKind> = rows.iter().map(|r| r.kind).collect();
+        sticky_at(
+            &kinds,
+            &self.file_starts,
+            self.scroll,
+            self.body_h_screen(),
+        )
+    }
+
+    fn sticky_h(&self) -> usize {
+        self.sticky_rows().len()
+    }
+
+    /// Map a screen body-row `y` to the document row drawn there: the sticky
+    /// band up top, then linear from `scroll` below it.
+    fn screen_y_to_doc(&self, y: u16) -> usize {
+        let sticky = self.sticky_rows();
+        let k = sticky.len();
+        let last = self.rows().len().saturating_sub(1);
+        if (y as usize) < k {
+            sticky[y as usize]
+        } else {
+            (self.scroll + (y as usize - k)).min(last)
+        }
     }
 
     /// Rows reserved at the bottom: the footer bar, plus the expanded help
@@ -1337,7 +1377,7 @@ impl App {
         if rows.is_empty() {
             return (0, 0);
         }
-        let row = (self.scroll + y as usize).min(rows.len() - 1);
+        let row = self.screen_y_to_doc(y);
         let (origin, cs) = self.pane_geom(rows[row].kind, pane);
         let len = rows[row].content.len();
         let col = (x.saturating_sub(origin + cs) as usize + self.hscroll).min(len);
@@ -1852,7 +1892,7 @@ impl App {
                 if m.button != MouseButton::Left {
                     return Ok(false);
                 }
-                let footer_row = self.viewport_rows() as u16;
+                let footer_row = self.body_h_screen() as u16;
                 // The "? help" badge toggles the help grid from any view.
                 if m.y == footer_row && m.x >= self.help_badge_x {
                     self.help_open = !self.help_open;
@@ -1919,7 +1959,7 @@ impl App {
                         let idx = self.file_window(body_h as usize) + m.y as usize;
                         self.select_file_at(idx);
                     } else {
-                        self.set_cursor(self.scroll + m.y as usize);
+                        self.set_cursor(self.screen_y_to_doc(m.y));
                         // Detect a double-click (same cell, quick succession):
                         // on a hunk header it expands the folded context.
                         let now = Instant::now();
@@ -1959,7 +1999,7 @@ impl App {
                     // Dragging the idle mascot: follow the pointer, keeping the
                     // grab offset, and let it lean its antennas as it moves.
                     let bx = self.body_x();
-                    let body_h = self.viewport_rows() as u16;
+                    let body_h = self.body_h_screen() as u16;
                     let bw = self.screen.width().saturating_sub(self.sidebar_w());
                     let tx = m.x.saturating_sub(bx).saturating_sub(gx) as f32;
                     let ty = m.y.saturating_sub(gy) as f32;
@@ -1973,7 +2013,7 @@ impl App {
                 } else if self.resizing_split {
                     self.resize_split_to(m.x);
                 } else if self.sel.is_some_and(|s| s.dragging) {
-                    let body_h = self.viewport_rows() as u16;
+                    let body_h = self.body_h_screen() as u16;
                     // Dragging past the top/bottom edge scrolls, so a selection
                     // can grow beyond the visible rows.
                     if m.y == 0 {
@@ -2136,6 +2176,8 @@ impl App {
         };
         let body_h = self.viewport_rows();
         let scroll = self.scroll;
+        let sticky = self.sticky_rows();
+        let k = sticky.len() as u16;
         let hs = self.hscroll as u16;
         let (sr, sc, er, ec) = sel.ordered();
         // Compute the on-screen highlight span for each visible selected row up
@@ -2145,9 +2187,15 @@ impl App {
             let rows = self.rows();
             let er = er.min(rows.len().saturating_sub(1));
             for r in sr..=er {
-                if r < scroll || r >= scroll + body_h {
+                // A selected row shows either pinned in the sticky band or in
+                // the scrolled content window; otherwise it's off-screen.
+                let y = if let Some(p) = sticky.iter().position(|&s| s == r) {
+                    p as u16
+                } else if r >= scroll && r < scroll + body_h {
+                    k + (r - scroll) as u16
+                } else {
                     continue;
-                }
+                };
                 let row = &rows[r];
                 if !App::row_in_pane(row.kind, sel.pane) {
                     continue;
@@ -2164,7 +2212,7 @@ impl App {
                 let sx = (cs + (s0 - hs)).min(right);
                 let ex = (cs + (e0 - hs)).min(right);
                 if ex > sx {
-                    segs.push(((r - scroll) as u16, sx, ex));
+                    segs.push((y, sx, ex));
                 }
             }
         }
@@ -2190,6 +2238,8 @@ impl App {
         let body_right = if self.sidebar_left() { w } else { w - sw };
         let body_h = self.viewport_rows();
         let scroll = self.scroll;
+        let sticky = self.sticky_rows();
+        let k = sticky.len() as u16;
         let hs = self.hscroll as u16;
         let split = self.split;
         let div = self.split_div_x();
@@ -2198,12 +2248,18 @@ impl App {
         {
             let rows = self.rows();
             for (mi, &(r, cstart, cend)) in self.matches.iter().enumerate() {
-                if r < scroll || r >= scroll + body_h || r >= rows.len() {
+                if r >= rows.len() {
                     continue;
                 }
+                let y = if let Some(p) = sticky.iter().position(|&s| s == r) {
+                    p as u16
+                } else if r >= scroll && r < scroll + body_h {
+                    k + (r - scroll) as u16
+                } else {
+                    continue;
+                };
                 let kind = rows[r].kind;
                 let len = rows[r].content.len() as u16;
-                let y = (r - scroll) as u16;
                 let cur = self.match_i == Some(mi);
                 let panes: &[Option<Pane>] =
                     if !split || matches!(kind, RowKind::Hunk | RowKind::Note) {
@@ -2709,11 +2765,18 @@ impl App {
     }
 
     fn render_diff(&mut self, x: u16, width: u16, body_h: u16) {
+        // The sticky band pins the enclosing file/hunk headers to the top; the
+        // scrolled content follows below it.
+        let sticky = self.sticky_rows();
         // Move the document rows out so we can freely borrow `self.screen`
         // while iterating; restored right after rendering.
         let rows = std::mem::take(&mut self.doc_rows);
         for row in 0..body_h {
-            let idx = self.scroll + row as usize;
+            let idx = if (row as usize) < sticky.len() {
+                sticky[row as usize]
+            } else {
+                self.scroll + (row as usize - sticky.len())
+            };
             let Some(r) = rows.get(idx) else {
                 break;
             };
@@ -2748,9 +2811,14 @@ impl App {
         let div_x = x + left_w;
         let right_x = div_x + 1;
         let right_w = width - left_w - 1;
+        let sticky = self.sticky_rows();
         let rows = std::mem::take(&mut self.doc_rows);
         for row in 0..body_h {
-            let idx = self.scroll + row as usize;
+            let idx = if (row as usize) < sticky.len() {
+                sticky[row as usize]
+            } else {
+                self.scroll + (row as usize - sticky.len())
+            };
             let Some(r) = rows.get(idx) else {
                 break;
             };
@@ -2995,6 +3063,35 @@ fn base_fg(style: &Style) -> Option<Color> {
 /// Rows before the first start (there are none in practice) map to file 0.
 fn file_of_row(starts: &[usize], row: usize) -> usize {
     starts.partition_point(|&s| s <= row).saturating_sub(1)
+}
+
+/// Document rows to pin at the top of the body for a given `scroll`: the
+/// enclosing file header and the current hunk header, but only once they've
+/// scrolled strictly above the top content line (so a header still naturally on
+/// screen isn't duplicated). Capped so at least one content row remains.
+fn sticky_at(
+    kinds: &[RowKind],
+    file_starts: &[usize],
+    scroll: usize,
+    body_h: usize,
+) -> Vec<usize> {
+    if scroll == 0 || scroll >= kinds.len() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let fi = file_starts.get(file_of_row(file_starts, scroll)).copied().unwrap_or(0);
+    if fi < scroll {
+        out.push(fi);
+    }
+    // The hunk to pin is the one whose body contains the top line. If the top
+    // line *is* a hunk header it's already visible, so nothing to pin.
+    if let Some(hi) = (fi + 1..=scroll).rev().find(|&i| kinds[i] == RowKind::Hunk) {
+        if hi < scroll {
+            out.push(hi);
+        }
+    }
+    out.truncate(body_h.saturating_sub(1));
+    out
 }
 
 /// A finished background document rebuild, swapped in atomically by
@@ -3386,6 +3483,43 @@ mod tests {
         assert_eq!(file_of_row(&starts, 11), 1);
         assert_eq!(file_of_row(&starts, 12), 2); // last file's header
         assert_eq!(file_of_row(&starts, 99), 2); // past the end stays in last
+    }
+
+    #[test]
+    fn sticky_at_pins_file_and_hunk_headers_above_scroll() {
+        use super::{sticky_at, RowKind::*};
+        // File header, hunk, some lines, second hunk, more lines.
+        let kinds = [File, Hunk, Context, Add, Hunk, Context, Context, Context];
+        let starts = [0usize];
+        let big = 100; // roomy body: nothing gets truncated
+        // At the very top nothing is pinned.
+        assert_eq!(sticky_at(&kinds, &starts, 0, big), Vec::<usize>::new());
+        // Scrolled just past the file header: only the file header pins (the
+        // first hunk at row 1 is still the top visible line, not above it).
+        assert_eq!(sticky_at(&kinds, &starts, 1, big), vec![0]);
+        // Inside the first hunk: file header + that hunk header pin.
+        assert_eq!(sticky_at(&kinds, &starts, 3, big), vec![0, 1]);
+        // Past the second hunk header: it replaces the first as the current one.
+        assert_eq!(sticky_at(&kinds, &starts, 6, big), vec![0, 4]);
+        // Landing exactly on the second hunk header pins only the file header —
+        // that hunk header is itself the top visible line, so it isn't pinned.
+        assert_eq!(sticky_at(&kinds, &starts, 4, big), vec![0]);
+        // A cramped body keeps at least one content row (cap = body_h - 1).
+        assert_eq!(sticky_at(&kinds, &starts, 6, 2), vec![0]);
+        assert_eq!(sticky_at(&kinds, &starts, 6, 1), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn sticky_at_second_file_ignores_earlier_files_headers() {
+        use super::{sticky_at, RowKind::*};
+        // Two files; the second starts at row 3.
+        let kinds = [File, Hunk, Context, File, Hunk, Context, Context];
+        let starts = [0usize, 3];
+        // Inside the second file's hunk: pin that file's header (3) and hunk (4),
+        // never the first file's rows.
+        assert_eq!(sticky_at(&kinds, &starts, 6, 100), vec![3, 4]);
+        // Exactly on the second file's header row: nothing pins yet.
+        assert_eq!(sticky_at(&kinds, &starts, 3, 100), Vec::<usize>::new());
     }
 
     #[test]
