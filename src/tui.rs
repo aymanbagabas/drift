@@ -941,6 +941,11 @@ impl App {
     /// Re-run the diff source and rebuild the view, keeping the cursor near
     /// where it was so refreshes and fold-expansions aren't jarring.
     fn reload(&mut self) {
+        // A piped diff (pager mode) is one-shot: stdin is already consumed, so
+        // re-reading yields nothing and would wipe the view. Nothing to reload.
+        if matches!(self.source, Source::Stdin) {
+            return;
+        }
         let text = self.source.diff(&self.effective_opts()).unwrap_or_default();
         self.rebuild_from(text);
     }
@@ -1126,9 +1131,12 @@ impl App {
         }
     }
 
-    /// The quick-help entries shown in the expandable footer grid.
-    fn help_entries() -> &'static [(&'static str, &'static str)] {
-        &[
+    /// The quick-help entries shown in the expandable footer grid. In pager
+    /// mode (a static piped diff) the repo-driven affordances are inert, so
+    /// they're dropped to keep the help honest.
+    fn help_entries(&self) -> Vec<(&'static str, &'static str)> {
+        let piped = matches!(self.source, Source::Stdin);
+        [
             ("j/k ↑/↓", "move"),
             ("h/l ←/→", "scroll x"),
             ("^d/^u", "half page"),
@@ -1151,12 +1159,15 @@ impl App {
             ("?", "toggle help"),
             ("q", "quit"),
         ]
+        .into_iter()
+        .filter(|(k, _)| !(piped && matches!(*k, "w" | "a" | "enter" | "r")))
+        .collect()
     }
 
     /// Grid geometry for the help footer: (columns, rows, cell width). Packs
     /// entries into as many columns as fit the terminal width, charm-style.
     fn help_grid(&self) -> (usize, usize, usize) {
-        let entries = Self::help_entries();
+        let entries = self.help_entries();
         let cell_w = entries
             .iter()
             .map(|(k, v)| self.width(k) as usize + 2 + self.width(v) as usize)
@@ -1597,7 +1608,10 @@ impl App {
         watch: bool,
         poll: Duration,
     ) -> io::Result<()> {
-        self.watch = watch;
+        // Watch is meaningless for a piped diff (pager mode): the input is a
+        // one-shot static stream with no repo to watch. Force it off so `-w`
+        // piped doesn't leave a stuck, un-toggleable indicator.
+        self.watch = watch && !matches!(self.source, Source::Stdin);
         let mut last_poll = Instant::now();
         loop {
             // Fold in any rows the startup worker has finished.
@@ -1870,13 +1884,18 @@ impl App {
                 } else if k.matches("b") {
                     self.sidebar = Some(!self.sidebar_visible());
                 } else if k.matches("w") {
-                    self.watch = !self.watch;
-                    // Turning watch on catches up on anything that changed while
-                    // it was off: notifications received meanwhile were drained
-                    // and dropped, so without this the view stays stale until the
-                    // next change. (The `a` toggle already reloads on flip.)
-                    if self.watch {
-                        self.reload();
+                    // Watch needs a live repo; a piped diff (pager mode) is
+                    // static, so leave it a no-op there.
+                    if !matches!(self.source, Source::Stdin) {
+                        self.watch = !self.watch;
+                        // Turning watch on catches up on anything that changed
+                        // while it was off: notifications received meanwhile were
+                        // drained and dropped, so without this the view stays
+                        // stale until the next change. (The `a` toggle reloads on
+                        // flip too.)
+                        if self.watch {
+                            self.reload();
+                        }
                     }
                 } else if k.matches("a") {
                     // Toggle untracked files in the worktree view; a no-op for
@@ -2518,7 +2537,7 @@ impl App {
     /// pairs into as many columns as fit (charm-style).
     fn render_help_grid(&mut self, y0: u16, h: u16) {
         let (_, rows, cell_w) = self.help_grid();
-        let entries = Self::help_entries();
+        let entries = self.help_entries();
         let key_style = self.theme.help_key.clone();
         let desc_style = self.theme.help_desc.clone();
         // Descriptions align to a fixed column so keys and descriptions line up
