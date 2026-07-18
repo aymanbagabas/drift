@@ -1870,6 +1870,13 @@ impl App {
                     self.sidebar = Some(!self.sidebar_visible());
                 } else if k.matches("w") {
                     self.watch = !self.watch;
+                    // Turning watch on catches up on anything that changed while
+                    // it was off: notifications received meanwhile were drained
+                    // and dropped, so without this the view stays stale until the
+                    // next change. (The `a` toggle already reloads on flip.)
+                    if self.watch {
+                        self.reload();
+                    }
                 } else if k.matches("?") {
                     self.help_open = !self.help_open;
                 } else if k.matches("e") {
