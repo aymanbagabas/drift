@@ -1704,6 +1704,15 @@ impl App {
         let page = self.viewport_rows() as isize;
         match ev {
             Event::KeyPress(k) => {
+                // Ctrl+Z suspends to the shell like any pager; uncurses restores
+                // the terminal, raises SIGTSTP, and resumes+repaints on `fg`.
+                // Unix-only: Windows has no SIGTSTP / job control.
+                #[cfg(unix)]
+                if k.matches("ctrl+z") {
+                    self.screen.suspend()?;
+                    self.screen.resume()?;
+                    return Ok(false);
+                }
                 // Search prompt captures the keyboard while typing: printable
                 // keys extend the query, Enter confirms and jumps, Esc cancels,
                 // Backspace edits. Nothing else fires until the prompt closes.
