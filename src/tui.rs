@@ -1168,12 +1168,12 @@ impl App {
     /// entries into as many columns as fit the terminal width, charm-style.
     fn help_grid(&self) -> (usize, usize, usize) {
         let entries = self.help_entries();
-        let cell_w = entries
-            .iter()
-            .map(|(k, v)| self.width(k) as usize + 2 + self.width(v) as usize)
-            .max()
-            .unwrap_or(12)
-            + 3; // gap between columns
+        // Descriptions align to a shared key column (see render_help_grid), so the
+        // cell must be sized from that same key_w, not each entry's own key width;
+        // otherwise a short key with a long description overflows its column.
+        let key_w = entries.iter().map(|(k, _)| self.width(k) as usize).max().unwrap_or(0);
+        let desc_w = entries.iter().map(|(_, v)| self.width(v) as usize).max().unwrap_or(0);
+        let cell_w = key_w + 2 + desc_w + 3; // +2 key/desc gap, +3 column gap
         let w = self.screen.width() as usize;
         let cols = ((w.saturating_sub(1)) / cell_w).clamp(1, entries.len());
         let rows = entries.len().div_ceil(cols);
