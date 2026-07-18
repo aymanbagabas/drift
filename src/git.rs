@@ -101,7 +101,9 @@ impl Source {
             use std::io::Read;
             let mut s = String::new();
             std::io::stdin().read_to_string(&mut s)?;
-            return Ok(s);
+            // Git colorizes the diff it pipes to a pager; strip it so the
+            // parser sees plain text.
+            return Ok(uncurses::ansi::strip::strip(&s));
         }
         // Force a stable, parseable format regardless of user git config.
         let mut a: Vec<String> = vec![

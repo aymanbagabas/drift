@@ -395,6 +395,33 @@ index e69de29..0cfbf08 100644\n\
     }
 
     #[test]
+    fn strips_ansi_so_colorized_diff_parses() {
+        // Git colorizes the diff it pipes to a pager (color.diff auto-on for
+        // pagers). The raw bytes carry SGR codes and mnemonic i/ w/ prefixes,
+        // exactly as captured from `git -c pager.diff=diffv diff`.
+        let colored = "\x1b[33mdiff --git i/f.txt w/f.txt\x1b[m\n\
+\x1b[33mindex de98044..4657bb7 100644\x1b[m\n\
+\x1b[33m--- i/f.txt\x1b[m\n\
+\x1b[33m+++ w/f.txt\x1b[m\n\
+\x1b[36m@@ -1,3 +1,3 @@\x1b[m\n\
+ a\n\
+\x1b[31m-b\x1b[m\n\
+\x1b[32m+CHANGED\x1b[m\n\
+ c\n";
+        // Raw colorized text parses to nothing (the bug).
+        assert_eq!(parse(colored).len(), 0);
+        // After stripping it parses cleanly.
+        let files = parse(&uncurses::ansi::strip::strip(colored));
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), "f.txt");
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(lines[1].kind, LineKind::Remove);
+        assert_eq!(lines[2].kind, LineKind::Add);
+        assert_eq!(lines[2].content, "CHANGED");
+        assert!(!lines[2].content.contains('\x1b'));
+    }
+
+    #[test]
     fn intraline_marks_changed_word() {
         let files = parse(SAMPLE);
         let lines = &files[0].hunks[0].lines;
