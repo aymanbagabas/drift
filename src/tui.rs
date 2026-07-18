@@ -1142,6 +1142,7 @@ impl App {
             ("f", "files"),
             ("b", "sidebar"),
             ("w", "watch on/off"),
+            ("a", "untracked on/off"),
             ("enter", "expand context"),
             ("e", "edit in $EDITOR"),
             ("y", "copy line/selection"),
@@ -1877,6 +1878,13 @@ impl App {
                     if self.watch {
                         self.reload();
                     }
+                } else if k.matches("a") {
+                    // Toggle untracked files in the worktree view; a no-op for
+                    // rev/staged/stdin sources, which never surface untracked.
+                    if self.source.reads_worktree() {
+                        self.opts.all = !self.opts.all;
+                        self.reload();
+                    }
                 } else if k.matches("?") {
                     self.help_open = !self.help_open;
                 } else if k.matches("e") {
@@ -2419,9 +2427,20 @@ impl App {
             help_x
         };
 
+        // "A" badge when the worktree view includes untracked files.
+        let a_x = if self.opts.all && self.source.reads_worktree() {
+            let a_badge = " A ";
+            let ax = w_x.saturating_sub(self.width(a_badge));
+            self.screen
+                .set_str((ax, row), a_badge, self.theme.statusbar_watch.clone());
+            ax
+        } else {
+            w_x
+        };
+
         // Global stats.
         let stats = format!(" {nf} files +{add} -{del} ");
-        let stats_x = w_x.saturating_sub(self.width(&stats));
+        let stats_x = a_x.saturating_sub(self.width(&stats));
         self.screen
             .set_str((stats_x, row), &stats, self.theme.statusbar_stats.clone());
 
