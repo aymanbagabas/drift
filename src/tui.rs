@@ -1831,9 +1831,9 @@ impl App {
                 } else if k.matches_any(["l", "right"]) {
                     self.scroll_h(4);
                 } else if k.matches_any(["ctrl+d", "pagedown", "space"]) {
-                    self.move_cursor(page / 2);
+                    self.scroll_page(page / 2);
                 } else if k.matches_any(["ctrl+u", "pageup"]) {
-                    self.move_cursor(-page / 2);
+                    self.scroll_page(-page / 2);
                 } else if k.matches_any(["g", "home"]) {
                     self.cursor_to(0);
                 } else if k.matches_any(["G", "end"]) {
