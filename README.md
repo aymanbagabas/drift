@@ -73,6 +73,7 @@ Some flags worth knowing:
 | `F` | File list modal |
 | `B` | Toggle the file sidebar |
 | `w` | Toggle watch mode |
+| `V` | Start / cancel a line selection; any motion key extends it |
 | `y` | Copy the selection, or the cursor line when nothing is selected |
 | `Y` | Copy the whole current file |
 | `enter` | Expand folded context, or open the file at the cursor |

@@ -211,6 +211,15 @@ impl Sel {
     fn is_empty(&self) -> bool {
         self.a_row == self.c_row && self.a_col == self.c_col
     }
+
+    /// A whole-line selection from `anchor` to `cursor`. Columns run full-width
+    /// in reading order so [`Sel::ordered`] covers both rows entirely, whichever
+    /// direction the selection grew. `pane` is `None`: the cursor is a document
+    /// row, which in split view names no side.
+    fn lines(anchor: usize, cursor: usize) -> Self {
+        let (a_col, c_col) = if anchor <= cursor { (0, usize::MAX) } else { (usize::MAX, 0) };
+        Sel { a_row: anchor, a_col, c_row: cursor, c_col, dragging: false, pane: None }
+    }
 }
 
 /// Mascot bounding box in cells: an 11-wide Space-Invaders–style alien monster
@@ -758,8 +767,12 @@ pub struct App {
     /// Extra lines of context added on top of the base setting, grown by
     /// expanding folded regions with Enter on a hunk header.
     expand: usize,
-    /// Active mouse text selection, drawn reversed and yanked with `y`.
+    /// Active text selection, drawn reversed and yanked with `y`.
     sel: Option<Sel>,
+    /// Anchor row of a keyboard visual-line selection (`V`), or `None` when
+    /// visual mode is off. While set, cursor movement extends `sel` instead of
+    /// clearing it.
+    visual: Option<usize>,
     /// Transient footer note (e.g. "copied 3 lines") with the instant it was
     /// set, so it auto-expires after `FLASH`.
     flash: Option<(String, Instant)>,
@@ -840,6 +853,7 @@ impl App {
             watch: false,
             expand: 0,
             sel: None,
+            visual: None,
             flash: None,
             last_diff: String::new(),
             mascot: None,
@@ -1158,6 +1172,7 @@ impl App {
             ("enter", "expand context"),
             ("v", "edit in $EDITOR"),
             ("y", "copy line/selection"),
+            ("V", "select lines"),
             ("Y", "copy file diff"),
             ("r", "refresh"),
             ("?", "toggle help"),
@@ -1790,7 +1805,7 @@ impl App {
                         return Ok(false);
                     }
                     if self.sel.is_some() {
-                        self.sel = None;
+                        self.clear_sel();
                     } else if !self.query.is_empty() {
                         self.query.clear();
                         self.matches.clear();
@@ -1847,9 +1862,16 @@ impl App {
                     self.yank_file()?;
                     return Ok(false);
                 }
-                // Any other navigation key cancels an active selection; the
-                // "copied" note fades on its own timer.
-                self.sel = None;
+                if k.matches("V") {
+                    self.toggle_visual();
+                    return Ok(false);
+                }
+                // Any other navigation key cancels a mouse selection, but
+                // extends a visual-mode one; the "copied" note fades on its own
+                // timer.
+                if self.visual.is_none() {
+                    self.sel = None;
+                }
                 if k.matches_any(["j", "down"]) {
                     self.move_cursor(1);
                 } else if k.matches_any(["k", "up"]) {
@@ -1939,10 +1961,16 @@ impl App {
                 } else if k.matches("r") {
                     self.reload();
                 }
+                // Whatever the cursor did above, drag the visual selection with
+                // it — one place, so every motion key extends the selection.
+                self.sync_visual();
             }
             Event::MouseWheel(m) => {
-                // Scrolling moves content under any selection, so drop it.
-                self.sel = None;
+                // Scrolling moves content under a mouse selection, so drop it;
+                // a visual selection is anchored to the cursor and survives.
+                if self.visual.is_none() {
+                    self.sel = None;
+                }
                 match m.button {
                     MouseButton::WheelUp => self.scroll_page(-3),
                     MouseButton::WheelDown => self.scroll_page(3),
@@ -1950,6 +1978,7 @@ impl App {
                     MouseButton::WheelRight => self.scroll_h(3),
                     _ => {}
                 }
+                self.sync_visual();
             }
             Event::MouseClick(m) => {
                 if m.button != MouseButton::Left {
@@ -2033,7 +2062,7 @@ impl App {
                         });
                         self.last_click = Some((now, m.x, m.y));
                         if dbl && self.on_hunk() && !matches!(self.source, Source::Stdin) {
-                            self.sel = None;
+                            self.clear_sel();
                             self.last_click = None;
                             self.expand_here();
                         } else {
@@ -2042,6 +2071,7 @@ impl App {
                             // the unified view spans the whole width.
                             let pane = if self.split { self.pane_at(m.x) } else { None };
                             let (r, c) = self.point_to_content(m.x, m.y, pane);
+                            self.visual = None; // a click starts a fresh mouse selection
                             self.sel = Some(Sel {
                                 a_row: r,
                                 a_col: c,
@@ -2113,7 +2143,7 @@ impl App {
                 }
             }
             Event::Resize(ws) => {
-                self.sel = None;
+                self.clear_sel();
                 self.screen.resize((ws.col, ws.row));
                 self.move_cursor(0);
                 self.scroll_h(0);
@@ -2156,7 +2186,7 @@ impl App {
     fn yank(&mut self) -> io::Result<()> {
         let text = match self.sel {
             Some(sel) => {
-                self.sel = None;
+                self.clear_sel();
                 self.selection_text(sel)
             }
             // No selection: copy the whole line under the cursor.
@@ -2199,6 +2229,35 @@ impl App {
         self.set_flash("copied file diff");
         Ok(())
     }
+
+    /// Start, extend, or cancel a keyboard visual-line selection.
+    ///
+    /// Line-wise (not character-wise) because a diff row is only ever copied as
+    /// a whole line: the gutter, +/- sign, and split panes make a character
+    /// anchor ambiguous, and `y` already yanks whole rows.
+    fn toggle_visual(&mut self) {
+        if self.visual.take().is_some() {
+            self.sel = None;
+        } else {
+            self.visual = Some(self.cursor);
+            self.sync_visual();
+        }
+    }
+
+    /// Re-derive `sel` from the visual anchor and the cursor, so any motion key
+    /// extends the selection without each one knowing about visual mode.
+    fn sync_visual(&mut self) {
+        if let Some(anchor) = self.visual {
+            self.sel = Some(Sel::lines(anchor, self.cursor));
+        }
+    }
+
+    /// Drop any selection, including visual mode.
+    fn clear_sel(&mut self) {
+        self.sel = None;
+        self.visual = None;
+    }
+
     fn selection_text(&self, sel: Sel) -> String {
         let rows = self.rows();
         if rows.is_empty() {
@@ -3509,6 +3568,17 @@ mod tests {
 
     fn sel(a_row: usize, a_col: usize, c_row: usize, c_col: usize) -> Sel {
         Sel { a_row, a_col, c_row, c_col, dragging: false, pane: None }
+    }
+
+    #[test]
+    fn visual_selection_covers_whole_lines_in_both_directions() {
+        // Downward: anchor row starts at column 0, cursor row runs to the end.
+        assert_eq!(Sel::lines(2, 5).ordered(), (2, 0, 5, usize::MAX));
+        // Upward: the same span, so the anchor row is still fully covered.
+        assert_eq!(Sel::lines(5, 2).ordered(), (2, 0, 5, usize::MAX));
+        // A single row is a full line, and never counts as an empty selection.
+        assert_eq!(Sel::lines(3, 3).ordered(), (3, 0, 3, usize::MAX));
+        assert!(!Sel::lines(3, 3).is_empty());
     }
 
     #[test]
