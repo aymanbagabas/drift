@@ -59,20 +59,24 @@ Some flags worth knowing:
 |-----|--------|
 | `j` `k` / `↑` `↓` | Move the cursor |
 | `h` `l` / `←` `→` | Scroll horizontally (for lines wider than the view) |
-| `^d` `^u` | Half page down / up |
+| `0` `$` | Scroll to line start / end |
+| `d` `u` / `^d` `^u` | Half page down / up |
+| `space` `f` `^f` / `b` `^b` | Full page down / up |
+| `^e` `^y` | Scroll one line down / up |
 | `g` `G` | Top / bottom |
+| `H` `M` `L` | Cursor to screen top / middle / bottom |
 | `{` `}` | Previous / next hunk |
 | `[` `]` / `tab` `⇧tab` | Previous / next file |
 | `/` | Search the current file (regex, smart-case) |
 | `n` `N` | Next / previous match |
 | `s` | Toggle split view |
-| `f` | File list modal |
-| `b` | Toggle the file sidebar |
+| `F` | File list modal |
+| `B` | Toggle the file sidebar |
 | `w` | Toggle watch mode |
 | `y` | Copy the selection, or the cursor line when nothing is selected |
 | `Y` | Copy the whole current file |
 | `enter` | Expand folded context, or open the file at the cursor |
-| `e` | Open the current file in `$EDITOR` |
+| `v` | Open the current file in `$EDITOR` |
 | `r` | Refresh |
 | `?` | Toggle the help footer |
 | `q` | Quit |

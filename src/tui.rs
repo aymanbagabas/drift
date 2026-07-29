@@ -1139,20 +1139,24 @@ impl App {
         [
             ("j/k ↑/↓", "move"),
             ("h/l ←/→", "scroll x"),
-            ("^d/^u", "half page"),
+            ("0/$", "line start/end"),
+            ("d/u", "half page"),
+            ("f/b", "full page"),
+            ("^e/^y", "scroll one line"),
             ("g/G", "top/bottom"),
+            ("H/M/L", "screen top/mid/low"),
             ("{ }", "prev/next hunk"),
             ("[ ]", "prev/next file"),
             ("tab", "cycle files"),
             ("/", "search"),
             ("n/N", "next/prev match"),
             ("s", "split view"),
-            ("f", "files"),
-            ("b", "sidebar"),
+            ("F", "files"),
+            ("B", "sidebar"),
             ("w", "watch on/off"),
             ("a", "untracked on/off"),
             ("enter", "expand context"),
-            ("e", "edit in $EDITOR"),
+            ("v", "edit in $EDITOR"),
             ("y", "copy line/selection"),
             ("Y", "copy file diff"),
             ("r", "refresh"),
@@ -1821,11 +1825,11 @@ impl App {
                         self.select_file_at(0);
                     } else if k.matches_any(["G", "end"]) {
                         self.select_file_at(self.files.len().saturating_sub(1));
-                    } else if k.matches_any(["f", "tab"]) {
+                    } else if k.matches_any(["F", "tab"]) {
                         self.view = View::Diff;
                     } else if k.matches("?") {
                         self.help_open = !self.help_open;
-                    } else if k.matches_any(["enter", "e"]) {
+                    } else if k.matches_any(["enter", "v"]) {
                         self.view = View::Diff;
                     } else if k.matches("r") {
                         self.reload();
@@ -1854,14 +1858,32 @@ impl App {
                     self.scroll_h(-4);
                 } else if k.matches_any(["l", "right"]) {
                     self.scroll_h(4);
-                } else if k.matches_any(["ctrl+d", "pagedown", "space"]) {
+                } else if k.matches_any(["d", "ctrl+d"]) {
                     self.scroll_page(page / 2);
-                } else if k.matches_any(["ctrl+u", "pageup"]) {
+                } else if k.matches_any(["u", "ctrl+u"]) {
                     self.scroll_page(-page / 2);
+                } else if k.matches_any(["ctrl+f", "f", "pagedown", "space"]) {
+                    self.scroll_page(page);
+                } else if k.matches_any(["ctrl+b", "b", "pageup"]) {
+                    self.scroll_page(-page);
+                } else if k.matches("ctrl+e") {
+                    self.scroll_page(1);
+                } else if k.matches("ctrl+y") {
+                    self.scroll_page(-1);
                 } else if k.matches_any(["g", "home"]) {
                     self.cursor_to(0);
                 } else if k.matches_any(["G", "end"]) {
                     self.cursor_to(self.rows().len().saturating_sub(1));
+                } else if k.matches("H") {
+                    self.set_cursor(self.scroll);
+                } else if k.matches("M") {
+                    self.set_cursor(self.scroll + self.viewport_rows() / 2);
+                } else if k.matches("L") {
+                    self.set_cursor(self.scroll + self.viewport_rows().saturating_sub(1));
+                } else if k.matches_any(["0", "^"]) {
+                    self.hscroll = 0;
+                } else if k.matches("$") {
+                    self.hscroll = self.max_hscroll();
                 } else if k.matches_any(["}", ")"]) {
                     self.jump_hunk(1);
                 } else if k.matches_any(["{", "("]) {
@@ -1879,9 +1901,9 @@ impl App {
                     self.select_file(-1);
                 } else if k.matches("s") {
                     self.split = !self.split;
-                } else if k.matches("f") {
+                } else if k.matches("F") {
                     self.view = View::Stat;
-                } else if k.matches("b") {
+                } else if k.matches("B") {
                     self.sidebar = Some(!self.sidebar_visible());
                 } else if k.matches("w") {
                     // Watch needs a live repo; a piped diff (pager mode) is
@@ -1906,11 +1928,11 @@ impl App {
                     }
                 } else if k.matches("?") {
                     self.help_open = !self.help_open;
-                } else if k.matches("e") {
+                } else if k.matches("v") {
                     self.open_editor()?;
                 } else if k.matches("enter") {
                     // Enter expands folded context on a hunk header; it no
-                    // longer opens the editor (use `e` for that).
+                    // longer opens the editor (use `v` for that).
                     if self.on_hunk() && !matches!(self.source, Source::Stdin) {
                         self.expand_here();
                     }
