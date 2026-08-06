@@ -11,7 +11,14 @@
 
 <p align="center">
 A git diff pager that actually wants to be looked at.
-<img width="1300" height="820" alt="drift" src="https://github.com/user-attachments/assets/e9a8599f-a2a2-47f7-88dc-81f21b5a923b" />
+</p>
+
+<p align="center">
+  <picture>
+    <source srcset="https://github.com/aymanbagabas/drift/blob/main/demo/drift.gif?raw=true" type="image/gif">
+    <source srcset="https://raw.githubusercontent.com/aymanbagabas/drift/main/demo/drift.gif" type="image/gif">
+    <img width="900" alt="drift in action" src="demo/drift.gif">
+  </picture>
 </p>
 
 `drift` takes the diff you already know and drops it into a real terminal UI:
