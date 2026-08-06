@@ -32,11 +32,62 @@ No config needed to start. Themes, colors, and keys are all yours to bend later.
 
 ## Install
 
+### Homebrew (macOS, Linux)
+
+```sh
+brew install aymanbagabas/tap/drift
+```
+
+### Scoop (Windows)
+
+```sh
+scoop bucket add aymanbagabas https://github.com/aymanbagabas/scoop-bucket
+scoop install drift
+```
+
+### Cargo
+
 ```sh
 cargo install drift-diff
 ```
 
-That drops a `drift` binary on your `PATH`.
+### npm
+
+```sh
+npm install -g @aymanbagabas/drift
+```
+
+### Debian / Ubuntu
+
+```sh
+echo 'deb [trusted=yes] https://repo.aymanbagabas.com/apt/ /' | sudo tee /etc/apt/sources.list.d/aymanbagabas.list
+sudo apt update && sudo apt install drift
+```
+
+### Fedora / RHEL
+
+```sh
+echo '[aymanbagabas]
+name=Ayman Bagabas
+baseurl=https://repo.aymanbagabas.com/yum/
+enabled=1
+gpgcheck=0' | sudo tee /etc/yum.repos.d/aymanbagabas.repo
+sudo yum install drift
+```
+
+### Arch Linux (AUR)
+
+```sh
+yay -S drift-bin
+```
+
+### Prebuilt binaries
+
+Grab an archive for your platform from the
+[latest release](https://github.com/aymanbagabas/drift/releases/latest) and put
+the `drift` binary on your `PATH`.
+
+Every method installs a `drift` binary.
 
 ## Use it
 
