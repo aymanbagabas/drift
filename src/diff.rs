@@ -398,7 +398,7 @@ index e69de29..0cfbf08 100644\n\
     fn strips_ansi_so_colorized_diff_parses() {
         // Git colorizes the diff it pipes to a pager (color.diff auto-on for
         // pagers). The raw bytes carry SGR codes and mnemonic i/ w/ prefixes,
-        // exactly as captured from `git -c pager.diff=diffv diff`.
+        // exactly as captured from `git -c pager.diff=drift diff`.
         let colored = "\x1b[33mdiff --git i/f.txt w/f.txt\x1b[m\n\
 \x1b[33mindex de98044..4657bb7 100644\x1b[m\n\
 \x1b[33m--- i/f.txt\x1b[m\n\

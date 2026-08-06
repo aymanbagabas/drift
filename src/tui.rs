@@ -1990,9 +1990,9 @@ impl App {
                     self.help_open = !self.help_open;
                     return Ok(false);
                 }
-                // The "diffv" logo badge toggles the mascot from any view
+                // The "drift" logo badge toggles the mascot from any view
                 // (same as tapping Esc three times).
-                if m.y == footer_row && m.x < self.width(" diffv ") {
+                if m.y == footer_row && m.x < self.width(" drift ") {
                     self.mascot_pinned = !self.mascot_pinned;
                     return Ok(false);
                 }
@@ -2421,8 +2421,8 @@ impl App {
 
     fn update_title(&mut self) -> io::Result<()> {
         let want = match self.files.get(self.selected) {
-            Some(f) => format!("{} · diffv", f.path()),
-            None => "diffv".to_string(),
+            Some(f) => format!("{} · drift", f.path()),
+            None => "drift".to_string(),
         };
         if want != self.title {
             self.screen.set_title(&want)?;
@@ -2490,7 +2490,7 @@ impl App {
         self.screen.render()
     }
 
-    /// The single bottom footer: a bold "diffv" badge, the current file name,
+    /// The single bottom footer: a bold "drift" badge, the current file name,
     /// its stats and flags on a subtle chip, then right-aligned global stats, a
     /// watch indicator, and a "? help" badge.
     fn render_footer(&mut self, row: u16) {
@@ -2544,8 +2544,8 @@ impl App {
         self.screen
             .set_str((stats_x, row), &stats, self.theme.statusbar_stats.clone());
 
-        // Left: bold "diffv" badge in the primary accent.
-        let app = " diffv ";
+        // Left: bold "drift" badge in the primary accent.
+        let app = " drift ";
         self.screen
             .set_str((0, row), app, self.theme.statusbar_logo.clone());
         let mut x = self.width(app);

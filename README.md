@@ -1,8 +1,8 @@
-# diffv
+# drift
 
 A git diff pager that actually wants to be looked at.
 
-`diffv` takes the diff you already know and drops it into a real terminal UI:
+`drift` takes the diff you already know and drops it into a real terminal UI:
 syntax highlighting, word-level change emphasis, split or unified views, a
 file-list modal and a live sidebar you can click and drag to resize,
 jump-to-hunk, in-file search, open-in-`$EDITOR`, and a live mode that repaints
@@ -14,29 +14,29 @@ No config needed to start. Themes, colors, and keys are all yours to bend later.
 ## Install
 
 ```sh
-cargo install diffv
+cargo install drift
 ```
 
-That drops a `diffv` binary on your `PATH`.
+That drops a `drift` binary on your `PATH`.
 
 ## Use it
 
 ```sh
-diffv                     # working tree vs HEAD
-diffv -A                  # ...and untracked files too
-diffv --staged            # what's staged (alias: --cached)
-diffv HEAD~3              # a single commit
-diffv main..feature       # a range
-diffv -w                  # watch the repo and refresh on every change
-git diff | diffv          # pager mode: read a diff from stdin
+drift                     # working tree vs HEAD
+drift -A                  # ...and untracked files too
+drift --staged            # what's staged (alias: --cached)
+drift HEAD~3              # a single commit
+drift main..feature       # a range
+drift -w                  # watch the repo and refresh on every change
+git diff | drift          # pager mode: read a diff from stdin
 ```
 
 Make it your default git pager if you like:
 
 ```sh
-git config --global pager.diff diffv
-git config --global pager.show diffv
-git config --global pager.log  diffv
+git config --global pager.diff drift
+git config --global pager.show drift
+git config --global pager.log  drift
 ```
 
 Some flags worth knowing:
@@ -51,7 +51,7 @@ Some flags worth knowing:
 | `-U`, `--context N` | Lines of context around each change |
 | `--ignore-whitespace` | Ignore whitespace-only changes |
 | `--diff-algorithm ALGO` | `myers`, `minimal`, `patience`, or `histogram` |
-| `-- PATHSPEC...` | Limit to paths, e.g. `diffv -- src/ docs/` |
+| `-- PATHSPEC...` | Limit to paths, e.g. `drift -- src/ docs/` |
 
 ## Keys
 
@@ -84,7 +84,7 @@ Some flags worth knowing:
 
 ## Mouse
 
-diffv is fully mouse-driven too:
+drift is fully mouse-driven too:
 
 - Click a file in the sidebar to jump straight to it in the diff.
 - Click a file in the file modal to select it; the modal stays open until you
@@ -110,7 +110,7 @@ Set `theme = "..."` in your config. Built in and ready:
 - `catppuccin-mocha`, `catppuccin-latte`
 - `tokyonight`
 - `monokai`
-- `ansi`, which borrows your terminal's own 16 colors so diffv matches
+- `ansi`, which borrows your terminal's own 16 colors so drift matches
   whatever palette you already run. It leaves code text and word-diff
   emphasis alone, since 16 colors are too few to layer cleanly over diff
   colors.
@@ -122,17 +122,17 @@ The `themes/` directory has a full, commented config for every built-in theme.
 Copy one and go:
 
 ```sh
-mkdir -p ~/.config/diffv
-cp themes/dracula.toml ~/.config/diffv/config.toml
+mkdir -p ~/.config/drift
+cp themes/dracula.toml ~/.config/drift/config.toml
 ```
 
 ## Config
 
-diffv looks for a config file, in order, at:
+drift looks for a config file, in order, at:
 
-- `$XDG_CONFIG_HOME/diffv/config.{toml,yaml,yml,json}`
-- `~/.config/diffv/config.{toml,yaml,yml,json}`
-- `~/.diffv.toml`
+- `$XDG_CONFIG_HOME/drift/config.{toml,yaml,yml,json}`
+- `~/.config/drift/config.{toml,yaml,yml,json}`
+- `~/.drift.toml`
 
 TOML, YAML, and JSON all work. The top-level knobs:
 
@@ -157,28 +157,28 @@ name, or `default`/`none`/`-` for the terminal's own color. See any file in
 ### From git config
 
 Anything you can set in a config file, you can set in git config under the
-`diffv` section, which is handy for per-repo overrides. Colors and styles go in
+`drift` section, which is handy for per-repo overrides. Colors and styles go in
 `colors` and `styles` subsections. Git forbids `_` in a key, so a field like
 `add_emph` becomes `add-emph`:
 
 ```sh
-git config diffv.theme nord
-git config diffv.line-numbers false
-git config diffv.colors.add '#00ff00'
-git config diffv.colors.add-emph '#003300'
-git config diffv.styles.statusbar 'foreground surface bold'
+git config drift.theme nord
+git config drift.line-numbers false
+git config drift.colors.add '#00ff00'
+git config drift.colors.add-emph '#003300'
+git config drift.styles.statusbar 'foreground surface bold'
 ```
 
 Or in `~/.gitconfig` directly:
 
 ```ini
-[diffv]
+[drift]
     theme = nord
     line-numbers = false
-[diffv "colors"]
+[drift "colors"]
     add = "#00ff00"
     add-emph = "#003300"
-[diffv "styles"]
+[drift "styles"]
     statusbar = "foreground surface bold"
 ```
 

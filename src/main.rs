@@ -1,4 +1,4 @@
-//! diffv — a standalone git diff pager for the terminal.
+//! drift — a standalone git diff pager for the terminal.
 
 mod config;
 mod diff;
@@ -19,7 +19,7 @@ use git::Source;
 /// A standalone git diff pager: browse commit, staged, or working-tree diffs
 /// in a TUI with syntax highlighting, intra-line changes, and live refresh.
 #[derive(Parser, Debug)]
-#[command(name = "diffv", version, about)]
+#[command(name = "drift", version, about)]
 struct Cli {
     /// Commit to show, or a revision range like `main..feature`.
     revision: Option<String>,
@@ -42,7 +42,7 @@ struct Cli {
     #[arg(long = "interval", value_name = "MS", default_value_t = 300)]
     poll_interval: u64,
 
-    /// Run as if diffv was started in this directory (like `git -C`). Works
+    /// Run as if drift was started in this directory (like `git -C`). Works
     /// with worktrees and bare repositories.
     #[arg(short = 'C', long = "directory", value_name = "DIR")]
     directory: Option<PathBuf>,
@@ -67,14 +67,14 @@ struct Cli {
     #[arg(long = "diff-algorithm", value_name = "ALGO")]
     diff_algorithm: Option<String>,
 
-    /// Limit the diff to these paths (after `--`), e.g. `diffv -- src/ docs/`.
+    /// Limit the diff to these paths (after `--`), e.g. `drift -- src/ docs/`.
     #[arg(last = true, value_name = "PATHSPEC")]
     pathspec: Vec<String>,
 }
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("diffv: {e}");
+        eprintln!("drift: {e}");
         std::process::exit(1);
     }
 }

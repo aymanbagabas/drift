@@ -1,8 +1,8 @@
-# diffv ANSI theme: uses your terminal's own 16 ANSI colors (plus the
+# drift ANSI theme: uses your terminal's own 16 ANSI colors (plus the
 # terminal default fg/bg), so it matches whatever palette your terminal
 # defines. 256-color terminals can also reference indices 0-255 directly.
 #
-# Copy this to ~/.config/diffv/config.toml and tweak to taste, or pass it
+# Copy this to ~/.config/drift/config.toml and tweak to taste, or pass it
 # with --config. Color tokens accept ANSI names (black, red, green, yellow,
 # blue, magenta, cyan, white and their bright* variants), a 0-255 index, a
 # literal `#rrggbb`, or `default`/`none`/`-` for the terminal default.

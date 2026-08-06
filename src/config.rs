@@ -1,5 +1,5 @@
 //! Configuration: theme, colors, and settings loaded from a TOML/YAML/JSON
-//! file and overlaid with any `[diffv]` values from git config.
+//! file and overlaid with any `[drift]` values from git config.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ pub struct Colors {
     pub context: String,
     pub header: String,
     pub line_number: String,
-    /// Primary accent: the "diffv" badge background in the footer.
+    /// Primary accent: the "drift" badge background in the footer.
     pub primary: String,
     /// Secondary accent: file name text, the "? help" badge, and dialog
     /// backgrounds.
@@ -119,7 +119,7 @@ impl Default for Colors {
 
 impl Config {
     /// Load config: defaults, then a config file (explicit path or the first
-    /// found in standard locations), then git config `[diffv]` overrides.
+    /// found in standard locations), then git config `[drift]` overrides.
     pub fn load(explicit: Option<&Path>) -> Self {
         let mut cfg = Config::default();
         if let Some(path) = explicit.map(PathBuf::from).or_else(find_config_file) {
@@ -168,7 +168,7 @@ impl Config {
 
     fn apply_gitconfig(&mut self) {
         let Ok(out) = Command::new("git")
-            .args(["config", "--get-regexp", "^diffv\\."])
+            .args(["config", "--get-regexp", "^drift\\."])
             .output()
         else {
             return;
@@ -181,9 +181,9 @@ impl Config {
                 continue;
             };
             let val = val.trim();
-            let key = key.trim_start_matches("diffv.").to_ascii_lowercase();
-            // Colors and styles live in git subsections: `[diffv "colors"]` and
-            // `[diffv "styles"]`. Keys are kebab-case throughout (e.g.
+            let key = key.trim_start_matches("drift.").to_ascii_lowercase();
+            // Colors and styles live in git subsections: `[drift "colors"]` and
+            // `[drift "styles"]`. Keys are kebab-case throughout (e.g.
             // `add-emph`), matching the config-file and palette token names.
             if let Some(field) = key.strip_prefix("colors.") {
                 self.set_color(field, val);
@@ -261,10 +261,10 @@ impl Config {
 fn find_config_file() -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
-        dirs.push(PathBuf::from(x).join("diffv"));
+        dirs.push(PathBuf::from(x).join("drift"));
     }
     if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(&home).join(".config/diffv"));
+        dirs.push(PathBuf::from(&home).join(".config/drift"));
     }
     for dir in &dirs {
         for name in [
@@ -279,9 +279,9 @@ fn find_config_file() -> Option<PathBuf> {
             }
         }
     }
-    // Also honor a `~/.diffv.toml` dotfile.
+    // Also honor a `~/.drift.toml` dotfile.
     if let Ok(home) = std::env::var("HOME") {
-        let p = PathBuf::from(home).join(".diffv.toml");
+        let p = PathBuf::from(home).join(".drift.toml");
         if p.is_file() {
             return Some(p);
         }
@@ -300,7 +300,7 @@ fn parse_file(path: &Path) -> Option<Config> {
     match result {
         Ok(c) => Some(c),
         Err(e) => {
-            eprintln!("diffv: ignoring bad config {}: {e}", path.display());
+            eprintln!("drift: ignoring bad config {}: {e}", path.display());
             None
         }
     }

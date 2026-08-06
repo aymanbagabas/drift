@@ -211,7 +211,7 @@ mod tests {
     /// prefixes, on top of the tracked change.
     #[test]
     fn all_includes_untracked() {
-        let dir = std::env::temp_dir().join(format!("diffv-git-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("drift-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let run = |args: &[&str]| {

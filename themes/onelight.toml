@@ -1,6 +1,6 @@
-# diffv onelight theme (the built-in default on light terminals).
+# drift onelight theme (the built-in default on light terminals).
 #
-# Copy this to ~/.config/diffv/config.toml and tweak to taste, or pass it
+# Copy this to ~/.config/drift/config.toml and tweak to taste, or pass it
 # with --config. `[colors]` is the palette; `[styles]` maps named UI
 # components to a `fg bg attrs...` spec resolved against that palette. Any
 # color token also accepts a literal `#rrggbb`, a 0-255 index, or an ANSI

@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
-# diffv-pick: browse the git log, pick a commit, open it in diffv, repeat.
+# drift-pick: browse the git log, pick a commit, open it in drift, repeat.
 #
 # Uses fzf (fuzzy search + preview) when it's on your PATH, and falls back to a
 # plain numbered menu so it works with git alone. Picking a commit opens it in
-# diffv; quitting diffv drops you back at the list. Cancelling the picker
-# (Esc/Ctrl-C in fzf, or an empty line in the menu) exits without opening diffv.
+# drift; quitting drift drops you back at the list. Cancelling the picker
+# (Esc/Ctrl-C in fzf, or an empty line in the menu) exits without opening drift.
 #
 # Any extra arguments are passed straight through to `git log`, e.g.:
-#   diffv-pick --author=you           only your commits
-#   diffv-pick -- src/                touching src/
+#   drift-pick --author=you           only your commits
+#   drift-pick -- src/                touching src/
 set -eu
 
 pick_fzf() {
@@ -39,8 +39,8 @@ fi
 
 while :; do
 	# A cancelled picker exits non-zero (fzf) or returns empty (menu); either
-	# way we stop instead of opening diffv on nothing.
+	# way we stop instead of opening drift on nothing.
 	commit=$(pick "$@") || exit 0
 	[ -n "$commit" ] || exit 0
-	diffv "$commit"
+	drift "$commit"
 done
