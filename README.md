@@ -1,6 +1,11 @@
-# drift
+# drift 👾
+
+[![Crates.io](https://img.shields.io/crates/v/drift-diff.svg)](https://crates.io/crates/drift-diff)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A git diff pager that actually wants to be looked at.
+
+![drift in action](demo/drift.gif)
 
 `drift` takes the diff you already know and drops it into a real terminal UI:
 syntax highlighting, word-level change emphasis, split or unified views, a
@@ -97,6 +102,15 @@ drift is fully mouse-driven too:
   you copy just the old or just the new side.
 - Scroll wheel moves the page through the diff (the cursor stays put until it
   reaches an edge). Scroll the wheel left/right to pan wide lines horizontally.
+
+## The mascot 👾
+
+When your working tree is clean there's nothing to diff, so drift hands the
+screen to its mascot — a little Space-Invaders alien that drifts around, blinks,
+and changes expression while it waits for your next change. Grab it with the
+mouse and fling it, or tap `Esc` three times to summon it over any diff.
+
+![the drift mascot](demo/mascot.gif)
 
 ## Themes
 
