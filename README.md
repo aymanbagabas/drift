@@ -254,6 +254,10 @@ Or in `~/.gitconfig` directly:
 For the full list of every setting, color, component style, and flag, see
 [CONFIG.md](CONFIG.md).
 
+## Built with
+
+drift's terminal UI is powered by [uncurses](https://github.com/aymanbagabas/uncurses).
+
 ## License
 
 MIT
