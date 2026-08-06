@@ -466,4 +466,26 @@ index e69de29..0cfbf08 100644\n\
         // No commit preamble leaked into the first section.
         assert!(!sections[0].contains("commit abc"));
     }
+
+    #[test]
+    fn per_block_parse_equals_whole() {
+        // The stdin streamer (tui::spawn_stream) parses each `diff --git` block
+        // as it arrives instead of the whole diff at once. That's only correct
+        // if parsing blocks independently yields the same files, in order, as
+        // parsing everything together. Lock that invariant.
+        let d = format!(
+            "commit abc\n\n{SAMPLE}diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n"
+        );
+        let whole = parse(&d);
+        let streamed: Vec<FileDiff> = split_files(&d)
+            .iter()
+            .filter_map(|block| parse(block).into_iter().next())
+            .collect();
+        assert_eq!(streamed.len(), whole.len());
+        for (s, w) in streamed.iter().zip(&whole) {
+            assert_eq!(s.path(), w.path());
+            assert_eq!(s.hunks.len(), w.hunks.len());
+            assert_eq!(s.is_binary, w.is_binary);
+        }
+    }
 }

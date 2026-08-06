@@ -704,6 +704,12 @@ pub struct App {
     /// Background row builder feeding `doc_rows` after startup so the first
     /// frame isn't blocked on syntax highlighting.
     prefetch: Option<Receiver<(usize, Vec<Row>)>>,
+    /// Streaming stdin loader: parses the piped diff file-by-file as it arrives
+    /// (instead of blocking on EOF) and sends each finished file's parsed form,
+    /// raw patch, and built rows. `None` for non-stdin sources and once done.
+    stream: Option<Receiver<StreamItem>>,
+    /// True while `stream` is still delivering files, for the loading indicator.
+    loading: bool,
     /// In-flight async worktree poll: a background thread running the diff so
     /// the main loop never blocks on git, even on huge repos. `None` when idle.
     poll_worker: Option<Receiver<String>>,
@@ -825,6 +831,8 @@ impl App {
             doc_rows: Vec::new(),
             file_starts: Vec::new(),
             prefetch: None,
+            stream: None,
+            loading: false,
             poll_worker: None,
             rebuild_worker: None,
             query: String::new(),
@@ -865,10 +873,21 @@ impl App {
         Ok(app)
     }
 
-    /// Initial load used at startup: run the diff, parse it, then hand row
-    /// building off to a background thread so the first frame paints without
-    /// blocking on syntax highlighting.
+    /// Initial load used at startup. For a piped diff (pager mode) this streams
+    /// stdin file-by-file so the first file paints before the producer finishes;
+    /// every other source runs git, parses, then builds rows on a worker.
     fn start(&mut self) {
+        self.selected = 0;
+        self.cursor = 0;
+        self.scroll = 0;
+        self.doc_rows.clear();
+        self.file_starts.clear();
+
+        if matches!(self.source, Source::Stdin) {
+            self.spawn_stream();
+            return;
+        }
+
         match self.source.diff(&self.effective_opts()) {
             Ok(text) => {
                 self.files = diff::parse(&text);
@@ -881,12 +900,79 @@ impl App {
                 self.last_diff.clear();
             }
         }
-        self.selected = 0;
-        self.cursor = 0;
-        self.scroll = 0;
-        self.doc_rows.clear();
-        self.file_starts.clear();
         self.spawn_prefetch();
+    }
+
+    /// Stream a piped diff from stdin, emitting each file as its `diff --git`
+    /// block completes instead of blocking on EOF. Each finished block is
+    /// parsed and its rows built on this worker, so the main loop just appends.
+    fn spawn_stream(&mut self) {
+        use std::io::BufRead;
+        let hl = Arc::clone(&self.highlighter);
+        let intraline = self.config.intraline_enabled();
+        let tab = self.config.tab_width;
+        let (tx, rx) = channel::<StreamItem>();
+        self.loading = true;
+        std::thread::spawn(move || {
+            // Parse + build one completed block, then hand it to the main thread.
+            let flush = |block: &str, tx: &std::sync::mpsc::Sender<StreamItem>| -> bool {
+                let Some(file) = diff::parse(block).into_iter().next() else {
+                    return true; // no `diff --git` yet (preamble): nothing to emit.
+                };
+                let rows = build_file_rows(&file, &hl, intraline, tab);
+                tx.send(StreamItem { file, raw: block.to_string(), rows }).is_ok()
+            };
+            let mut block = String::new();
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                // Git colorizes diffs it pipes to a pager; strip per line so the
+                // parser sees plain text (codes never span lines).
+                let line = uncurses::ansi::strip::strip(&line);
+                if line.starts_with("diff --git") && !block.is_empty() {
+                    if !flush(&block, &tx) {
+                        return; // receiver dropped (quit): stop reading.
+                    }
+                    block.clear();
+                }
+                block.push_str(&line);
+                block.push('\n');
+            }
+            let _ = flush(&block, &tx); // final file at EOF.
+        });
+        self.stream = Some(rx);
+    }
+
+    /// Append any files the stdin streamer has finished parsing. Mirrors
+    /// `drain_prefetch` but also grows `files`/`raw_files` since streaming
+    /// discovers them incrementally. Clears `loading` when the pipe closes.
+    fn drain_stream(&mut self) {
+        let Some(rx) = self.stream.take() else {
+            return;
+        };
+        let mut got = false;
+        loop {
+            match rx.try_recv() {
+                Ok(item) => {
+                    self.file_starts.push(self.doc_rows.len());
+                    self.doc_rows.push(file_header_row(&item.file));
+                    self.doc_rows.extend(item.rows);
+                    self.files.push(item.file);
+                    self.raw_files.push(item.raw);
+                    got = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    self.stream = Some(rx);
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.loading = false; // pipe closed: all files delivered.
+                    break;
+                }
+            }
+        }
+        if got {
+            self.move_cursor(0);
+        }
     }
 
     /// Spawn a worker that builds every file's body rows in order and streams
@@ -1635,6 +1721,8 @@ impl App {
         loop {
             // Fold in any rows the startup worker has finished.
             self.drain_prefetch();
+            // Fold in files the stdin streamer has parsed (pager mode).
+            self.drain_stream();
             // Fold in a finished async worktree poll (non-blocking).
             self.drain_poll();
             // Swap in a finished async document rebuild (non-blocking).
@@ -1653,6 +1741,7 @@ impl App {
             // Poll faster while the prefetch is still streaming so freshly
             // parsed files appear promptly; idle at 200ms once it's done.
             let mut timeout = if self.prefetch.is_some()
+                || self.stream.is_some()
                 || self.poll_worker.is_some()
                 || self.rebuild_worker.is_some()
             {
@@ -2544,6 +2633,18 @@ impl App {
         self.screen
             .set_str((stats_x, row), &stats, self.theme.statusbar_stats.clone());
 
+        // Loading indicator while the stdin streamer is still delivering files.
+        // Muted, on the bar's own background: faint, no distinct badge.
+        let load_x = if self.loading {
+            let badge = " ⋯ loading ";
+            let lx = stats_x.saturating_sub(self.width(badge));
+            self.screen
+                .set_str((lx, row), badge, self.theme.statusbar_flags.clone());
+            lx
+        } else {
+            stats_x
+        };
+
         // Left: bold "drift" badge in the primary accent.
         let app = " drift ";
         self.screen
@@ -2552,7 +2653,7 @@ impl App {
 
         // File name.
         let name_seg = format!(" {name}");
-        let (name_clip, name_w) = self.clip(&name_seg, stats_x.saturating_sub(x));
+        let (name_clip, name_w) = self.clip(&name_seg, load_x.saturating_sub(x));
         self.screen
             .set_str((x, row), &name_clip, self.theme.statusbar_filename.clone());
         x += name_w;
@@ -2561,10 +2662,10 @@ impl App {
         if let Some(f) = file {
             let (fa, fd) = f.stats();
             let put = |s: &mut Self, x: &mut u16, text: &str, style: Style| {
-                if *x >= stats_x {
+                if *x >= load_x {
                     return;
                 }
-                let (t, tw) = s.clip(text, stats_x - *x);
+                let (t, tw) = s.clip(text, load_x - *x);
                 s.screen.set_str((*x, row), &t, style);
                 *x += tw;
             };
@@ -2595,8 +2696,8 @@ impl App {
             None
         };
         if let Some(badge) = search_badge {
-            if x < stats_x {
-                let (badge, bw) = self.clip(&badge, stats_x - x);
+            if x < load_x {
+                let (badge, bw) = self.clip(&badge, load_x - x);
                 self.screen
                     .set_str((x, row), &badge, self.theme.statusbar_search.clone());
                 x += bw;
@@ -2605,9 +2706,9 @@ impl App {
         // Transient note (e.g. "copied 3 lines") auto-expires; it renders after
         // the search badge so an active search never suppresses it.
         if let Some((msg, _)) = self.flash.clone() {
-            if x < stats_x {
+            if x < load_x {
                 let badge = format!(" {msg} ");
-                let (badge, _) = self.clip(&badge, stats_x - x);
+                let (badge, _) = self.clip(&badge, load_x - x);
                 self.screen
                     .set_str((x, row), &badge, self.theme.statusbar_add.clone());
             }
@@ -3225,6 +3326,14 @@ fn sticky_at(
     }
     out.truncate(body_h.saturating_sub(1));
     out
+}
+
+/// One file delivered by the stdin streamer (`spawn_stream`): its parsed form,
+/// raw patch text, and pre-built rows, ready for `drain_stream` to append.
+struct StreamItem {
+    file: FileDiff,
+    raw: String,
+    rows: Vec<Row>,
 }
 
 /// A finished background document rebuild, swapped in atomically by
