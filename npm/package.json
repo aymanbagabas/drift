@@ -1,0 +1,40 @@
+{
+  "name": "@aymanbagabas/drift",
+  "version": "0.0.0",
+  "description": "A standalone git diff pager for the terminal.",
+  "bin": {
+    "drift": "bin/drift.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/drift.js",
+    "install.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "git",
+    "diff",
+    "pager",
+    "tui",
+    "terminal"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aymanbagabas/drift.git"
+  },
+  "homepage": "https://github.com/aymanbagabas/drift#readme",
+  "license": "MIT"
+}
