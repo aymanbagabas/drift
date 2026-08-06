@@ -14,7 +14,7 @@ No config needed to start. Themes, colors, and keys are all yours to bend later.
 ## Install
 
 ```sh
-cargo install drift
+cargo install drift-diff
 ```
 
 That drops a `drift` binary on your `PATH`.
