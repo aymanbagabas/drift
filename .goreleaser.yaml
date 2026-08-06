@@ -84,7 +84,7 @@ publishers:
     ids:
       - packages
     dir: "{{ dir .ArtifactPath }}"
-    cmd: fury push --api-token={{ .Env.FURY_TOKEN }} {{ .ArtifactName }}
+    cmd: fury push --api-token={{ .Env.FURY_TOKEN }} --account={{ .Env.FURY_ACCOUNT }} {{ .ArtifactName }}
 
 brews:
   - name: drift

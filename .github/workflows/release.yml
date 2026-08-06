@@ -36,6 +36,7 @@ jobs:
           # PAT with write access to homebrew-tap and scoop-bucket.
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           FURY_TOKEN: ${{ secrets.FURY_TOKEN }}
+          FURY_ACCOUNT: ${{ secrets.FURY_ACCOUNT }}
           AUR_KEY: ${{ secrets.AUR_KEY }}
 
       # Publish the crate last, once the release itself succeeded. Reuses the
