@@ -1,3 +1,4 @@
 /target
 .DS_Store
 /dist
+/npm/README.md

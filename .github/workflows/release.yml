@@ -69,6 +69,10 @@ jobs:
       # Trusted publishing (OIDC) needs npm >= 11.5.1; node 22 ships an older one.
       - run: npm install -g npm@latest
 
+      # Reuse the project README as the package README (npm rewrites relative
+      # links to the repo's default branch) instead of maintaining a duplicate.
+      - run: cp README.md npm/README.md
+
       # Match the package version to the release tag, then publish. The wrapper
       # downloads the matching release binary at install time. Auth is via OIDC,
       # so no token is needed and provenance is attached automatically.
