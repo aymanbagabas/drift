@@ -101,11 +101,10 @@ drift -w                  # watch the repo and refresh on every change
 git diff | drift          # pager mode: read a diff from stdin
 ```
 
-Make it your default git pager for diffs:
+Make it your default git diff pager:
 
 ```sh
 git config --global pager.diff drift
-git config --global pager.show drift
 ```
 
 Some flags worth knowing:
