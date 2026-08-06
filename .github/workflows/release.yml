@@ -23,8 +23,12 @@ jobs:
       - uses: mlugg/setup-zig@v2
 
       # `fury` CLI pushes the deb/rpm/apk to Gemfury (repo.aymanbagabas.com).
-      - name: Install gemfury CLI
-        run: gem install gemfury
+      # https://gemfury.com/guide/cli/install/
+      - name: Install Gemfury CLI
+        run: |
+          echo "deb [trusted=yes] https://apt.fury.io/cli/ * *" | sudo tee /etc/apt/sources.list.d/fury-cli.list
+          sudo apt-get update && sudo apt-get install -y fury-cli
+          fury version
 
       - uses: goreleaser/goreleaser-action@v6
         with:
