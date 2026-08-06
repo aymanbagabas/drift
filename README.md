@@ -1,9 +1,15 @@
-# drift 👾
+<p align="center">
+  <img src="demo/mascot.svg" alt="drift" width="180">
+</p>
 
-[![Crates.io](https://img.shields.io/crates/v/drift-diff.svg)](https://crates.io/crates/drift-diff)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<h1 align="center">drift</h1>
 
-A git diff pager that actually wants to be looked at.
+<p align="center">
+  <a href="https://crates.io/crates/drift-diff"><img src="https://img.shields.io/crates/v/drift-diff.svg" alt="Crates.io"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
+
+<p align="center">A git diff pager that actually wants to be looked at.</p>
 
 ![drift in action](demo/drift.gif)
 
@@ -36,12 +42,11 @@ drift -w                  # watch the repo and refresh on every change
 git diff | drift          # pager mode: read a diff from stdin
 ```
 
-Make it your default git pager if you like:
+Make it your default git pager for diffs:
 
 ```sh
 git config --global pager.diff drift
 git config --global pager.show drift
-git config --global pager.log  drift
 ```
 
 Some flags worth knowing:
@@ -102,15 +107,6 @@ drift is fully mouse-driven too:
   you copy just the old or just the new side.
 - Scroll wheel moves the page through the diff (the cursor stays put until it
   reaches an edge). Scroll the wheel left/right to pan wide lines horizontally.
-
-## The mascot 👾
-
-When your working tree is clean there's nothing to diff, so drift hands the
-screen to its mascot — a little Space-Invaders alien that drifts around, blinks,
-and changes expression while it waits for your next change. Grab it with the
-mouse and fling it, or tap `Esc` three times to summon it over any diff.
-
-![the drift mascot](demo/mascot.gif)
 
 ## Themes
 
@@ -195,6 +191,9 @@ Or in `~/.gitconfig` directly:
 [drift "styles"]
     statusbar = "foreground surface bold"
 ```
+
+For the full list of every setting, color, component style, and flag, see
+[CONFIG.md](CONFIG.md).
 
 ## License
 
