@@ -157,7 +157,9 @@ fn run() -> std::io::Result<()> {
     };
     let _ = &watcher_guard;
 
-    let mut app = tui::App::new(cfg, source, opts)?;
+    let Some(mut app) = tui::App::new(cfg, source, opts)? else {
+        return Ok(()); // stdin wasn't a diff: peek printed it and bailed.
+    };
     let result = app.run(refresh, cli.watch, Duration::from_millis(cli.poll_interval));
     app.finish()?;
     result

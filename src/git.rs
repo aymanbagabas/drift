@@ -60,6 +60,27 @@ fn git(args: &[&str]) -> std::io::Result<std::process::Output> {
     Command::new("git").args(args).output()
 }
 
+/// Peek a piped stream to decide whether it's a unified diff before the TUI
+/// takes over the terminal. Reads lines until the first `diff --git` (ANSI
+/// stripped, since git may colorize) or EOF. Returns `(is_diff, consumed)`
+/// where `consumed` is the raw bytes read: on `false`, print them straight to
+/// the terminal (it wasn't a diff, e.g. `git diff --stat`); on `true`, hand
+/// them to the streamer so the already-read prefix isn't lost.
+pub fn peek_diff<R: std::io::BufRead>(mut r: R) -> std::io::Result<(bool, String)> {
+    let mut consumed = String::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if r.read_line(&mut line)? == 0 {
+            return Ok((false, consumed)); // EOF before any `diff --git`.
+        }
+        consumed.push_str(&line);
+        if uncurses::ansi::strip::strip(&line).starts_with("diff --git") {
+            return Ok((true, consumed));
+        }
+    }
+}
+
 /// Resolve the repository layout for the current directory, or None if not a
 /// git repo.
 pub fn discover() -> Option<Repo> {
@@ -289,5 +310,49 @@ mod tests {
         assert!(child_diff.contains("+two"), "child missing addition:\n{child_diff}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `peek_diff` recognizes a real unified diff (even colorized) and rejects
+    /// non-diff output like `git diff --stat`, returning the bytes it consumed
+    /// so the caller can pass them through untouched.
+    #[test]
+    fn peek_diff_detects_diff_vs_non_diff() {
+        // A unified diff: detected, prefix stops at the first `diff --git`.
+        let diff = b"diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n";
+        let (is, pre) = peek_diff(&diff[..]).unwrap();
+        assert!(is);
+        assert_eq!(pre, "diff --git a/f b/f\n");
+
+        // git show preamble before the diff: still detected; prefix carries it.
+        let show = b"commit abc\nAuthor: t\n\n    msg\n\ndiff --git a/f b/f\n@@ -1 +1 @@\n";
+        let (is, pre) = peek_diff(&show[..]).unwrap();
+        assert!(is);
+        assert!(pre.starts_with("commit abc"));
+        assert!(pre.ends_with("diff --git a/f b/f\n"));
+
+        // Non-diff (--stat): not detected; all bytes consumed for pass-through.
+        let stat = b" f | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n";
+        let (is, pre) = peek_diff(&stat[..]).unwrap();
+        assert!(!is);
+        assert_eq!(pre.as_bytes(), stat);
+
+        // Colorized `diff --git` (git's pager coloring) is still detected, and
+        // the consumed bytes keep their ANSI codes for faithful pass-through.
+        let colored = b"\x1b[1mdiff --git a/f b/f\x1b[m\n";
+        let (is, pre) = peek_diff(&colored[..]).unwrap();
+        assert!(is);
+        assert_eq!(pre.as_bytes(), colored, "ANSI codes must survive in the prefix");
+
+        // Non-diff with ANSI (e.g. colorized `--stat`): rejected, and every byte
+        // — escape codes included — is preserved so pass-through keeps color.
+        let colored_stat = b" f | 2 \x1b[32m+\x1b[m\x1b[31m-\x1b[m\n";
+        let (is, pre) = peek_diff(&colored_stat[..]).unwrap();
+        assert!(!is);
+        assert_eq!(pre.as_bytes(), colored_stat, "ANSI codes must survive pass-through");
+
+        // Empty stream: not a diff, nothing consumed.
+        let (is, pre) = peek_diff(&b""[..]).unwrap();
+        assert!(!is);
+        assert!(pre.is_empty());
     }
 }
