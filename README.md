@@ -9,9 +9,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-<p align="center">A git diff pager that actually wants to be looked at.</p>
-
-![drift in action](demo/drift.gif)
+<p align="center">
+A git diff pager that actually wants to be looked at.
+<img width="1300" height="820" alt="drift" src="https://github.com/user-attachments/assets/e9a8599f-a2a2-47f7-88dc-81f21b5a923b" />
+</p>
 
 `drift` takes the diff you already know and drops it into a real terminal UI:
 syntax highlighting, word-level change emphasis, split or unified views, a
