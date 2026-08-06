@@ -1,0 +1,148 @@
+# GoReleaser config for drift. Builds Rust binaries with cargo-zigbuild and
+# publishes archives, checksums, Linux packages, a Homebrew formula, and a
+# Scoop manifest. Requires zig + cargo-zigbuild (installed in CI) and a
+# TAP_GITHUB_TOKEN secret with write access to the tap and bucket repos.
+version: 2
+
+project_name: drift
+
+before:
+  hooks:
+    - rustup default stable
+    - cargo install --locked cargo-zigbuild
+    # Fail fast if the tag and Cargo.toml version disagree (real releases only).
+    - >-
+      sh -c '{{ if .IsSnapshot }}true{{ else }}grep -q "^version = \"{{ .Version }}\"" Cargo.toml
+      || { echo "Cargo.toml version != tag {{ .Version }}"; exit 1; }{{ end }}'
+
+builds:
+  - id: drift
+    builder: rust
+    binary: drift
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+      - x86_64-pc-windows-gnu
+    flags:
+      - --release
+
+archives:
+  - id: drift
+    formats: [tar.gz]
+    # Stable, predictable names so the npm wrapper can compute the download URL.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - CONFIG.md
+      - themes/*
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - '^style:'
+      - 'Merge '
+
+nfpms:
+  - id: packages
+    package_name: drift
+    maintainer: Ayman Bagabas <ayman.bagabas@gmail.com>
+    homepage: https://github.com/aymanbagabas/drift
+    description: A standalone git diff pager for the terminal.
+    license: MIT
+    formats: [deb, rpm, apk]
+    dependencies:
+      - git
+
+# Push the Linux packages to Gemfury (serves the apt/yum repo at
+# repo.aymanbagabas.com). Requires the `fury` CLI and a FURY_TOKEN in CI.
+publishers:
+  - name: fury.io
+    ids:
+      - packages
+    dir: "{{ dir .ArtifactPath }}"
+    cmd: fury push --api-token={{ .Env.FURY_TOKEN }} {{ .ArtifactName }}
+
+brews:
+  - name: drift
+    repository:
+      owner: aymanbagabas
+      name: homebrew-tap
+      branch: master
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    directory: "."
+    homepage: https://github.com/aymanbagabas/drift
+    description: A standalone git diff pager for the terminal.
+    license: MIT
+    dependencies:
+      - name: git
+    commit_author:
+      name: Ayman Bagabas
+      email: ayman.bagabas@gmail.com
+    test: |
+      system "#{bin}/drift", "--version"
+
+scoops:
+  - name: drift
+    repository:
+      owner: aymanbagabas
+      name: scoop-bucket
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    # Empty directory => manifest at the repo root so `scoop bucket list` sees it.
+    homepage: https://github.com/aymanbagabas/drift
+    description: A standalone git diff pager for the terminal.
+    license: MIT
+    commit_author:
+      name: Ayman Bagabas
+      email: ayman.bagabas@gmail.com
+
+aurs:
+  - name: drift-bin
+    homepage: https://github.com/aymanbagabas/drift
+    description: A standalone git diff pager for the terminal.
+    license: MIT
+    maintainers:
+      - Ayman Bagabas <ayman.bagabas@gmail.com>
+    private_key: "{{ .Env.AUR_KEY }}"
+    git_url: ssh://aur@aur.archlinux.org/drift-bin.git
+    depends:
+      - git
+    provides:
+      - drift
+    conflicts:
+      - drift
+    commit_author:
+      name: Ayman Bagabas
+      email: ayman.bagabas@gmail.com
+    package: |-
+      install -Dm755 "./drift" "${pkgdir}/usr/bin/drift"
+      install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/drift/LICENSE"
+
+release:
+  github:
+    owner: aymanbagabas
+    name: drift
