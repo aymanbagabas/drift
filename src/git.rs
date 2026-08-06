@@ -242,4 +242,52 @@ mod tests {
         assert!(text.contains("b/fresh.txt"), "untracked file missing:\n{text}");
         assert!(text.contains("new file"), "no new-file header:\n{text}");
     }
+
+    /// The single-commit (`Source::Rev`) path renders a patch for both a child
+    /// commit (diffed against its parent) and a root commit with no parent —
+    /// the parentless case is the easy one to break.
+    #[test]
+    fn rev_single_commit_renders_patch() {
+        let dir = std::env::temp_dir().join(format!("drift-rev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(["-C", dir.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.co"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "root"]);
+        let root = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout).unwrap().trim().to_string();
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        run(&["commit", "-qam", "child"]);
+        let child = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout).unwrap().trim().to_string();
+
+        let diff_of = |rev: &str| {
+            let prev = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&dir).unwrap();
+            let out = Source::Rev(rev.to_string()).diff(&Opts::default());
+            std::env::set_current_dir(prev).unwrap();
+            out.unwrap()
+        };
+
+        // Root commit (no parent): its initial contents show as a new file.
+        let root_diff = diff_of(&root);
+        assert!(root_diff.contains("diff --git"), "root not a patch:\n{root_diff}");
+        assert!(root_diff.contains("new file"), "root missing new-file header:\n{root_diff}");
+        assert!(root_diff.contains("+one"), "root missing added line:\n{root_diff}");
+
+        // Child commit: diffed against its parent.
+        let child_diff = diff_of(&child);
+        assert!(child_diff.contains("-one"), "child missing removal:\n{child_diff}");
+        assert!(child_diff.contains("+two"), "child missing addition:\n{child_diff}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
