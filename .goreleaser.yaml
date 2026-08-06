@@ -16,14 +16,26 @@ before:
       || { echo "Cargo.toml version != tag {{ .Version }}"; exit 1; }{{ end }}'
 
 builds:
-  - id: drift
+  # macOS builds natively (command: build, not the default zigbuild) so notify's
+  # FSEvents backend links against Apple's CoreServices framework. zig ships no
+  # Apple frameworks, so darwin can't cross-compile — this job runs on a macOS
+  # runner and cross-builds the rest below via zigbuild.
+  - id: darwin
+    builder: rust
+    binary: drift
+    command: build
+    targets:
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+    flags:
+      - --release
+
+  - id: cross
     builder: rust
     binary: drift
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
-      - x86_64-apple-darwin
-      - aarch64-apple-darwin
       - x86_64-pc-windows-gnu
     flags:
       - --release

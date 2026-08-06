@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    # macOS runner: darwin binaries build natively (FSEvents needs Apple's
+    # CoreServices framework, which zig can't provide), and zigbuild still
+    # cross-compiles the Linux/Windows targets from here.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,15 +29,39 @@ jobs:
       # https://gemfury.com/guide/cli/install/
       - name: Install Gemfury CLI
         run: |
-          echo "deb [trusted=yes] https://apt.fury.io/cli/ * *" | sudo tee /etc/apt/sources.list.d/fury-cli.list
-          sudo apt-get update && sudo apt-get install -y fury-cli
+          brew tap gemfury/tap
+          brew install fury-cli
           fury version
+
+      # AUR regularly goes down for maintenance. Probe the SSH endpoint first;
+      # if it's unreachable, tell GoReleaser to skip the aur publisher so the
+      # rest of the release still ships. ssh exit 255 == transport/auth failure
+      # (AUR down or key missing); any other code means we reached the AUR shell.
+      - name: Check AUR availability
+        id: aur
+        env:
+          AUR_KEY: ${{ secrets.AUR_KEY }}
+        run: |
+          key="$(mktemp)"
+          printf '%s\n' "$AUR_KEY" > "$key"
+          chmod 600 "$key"
+          ssh -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=15 -o BatchMode=yes \
+              aur@aur.archlinux.org help >/dev/null 2>&1
+          rc=$?
+          rm -f "$key"
+          if [ "$rc" -eq 255 ]; then
+            echo "::warning title=AUR skipped::AUR unreachable (ssh rc=255) — skipping the aur publisher; publish it manually once AUR is back."
+            echo "skip=--skip=aur" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean ${{ steps.aur.outputs.skip }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PAT with write access to homebrew-tap and scoop-bucket.
@@ -42,6 +69,14 @@ jobs:
           FURY_TOKEN: ${{ secrets.FURY_TOKEN }}
           FURY_ACCOUNT: ${{ secrets.FURY_ACCOUNT }}
           AUR_KEY: ${{ secrets.AUR_KEY }}
+
+      # Keep the built archives/packages around for a week for debugging.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
 
       # Publish the crate last, once the release itself succeeded. Reuses the
       # toolchain already set up above.
