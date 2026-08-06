@@ -133,14 +133,14 @@ scoops:
       email: ayman.bagabas@gmail.com
 
 aurs:
-  - name: drift-bin
+  - name: drift-diff-bin
     homepage: https://github.com/aymanbagabas/drift
     description: A standalone git diff pager for the terminal.
     license: MIT
     maintainers:
       - Ayman Bagabas <ayman.bagabas@gmail.com>
     private_key: "{{ .Env.AUR_KEY }}"
-    git_url: ssh://aur@aur.archlinux.org/drift-bin.git
+    git_url: ssh://aur@aur.archlinux.org/drift-diff-bin.git
     depends:
       - git
     provides:

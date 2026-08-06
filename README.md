@@ -78,7 +78,7 @@ sudo yum install drift
 ### Arch Linux (AUR)
 
 ```sh
-yay -S drift-bin
+yay -S drift-diff-bin
 ```
 
 ### Prebuilt binaries
