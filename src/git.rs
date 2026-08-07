@@ -425,6 +425,25 @@ mod tests {
         assert!(!is);
         assert!(pre.is_empty());
 
+        // Valid multibyte UTF-8 (CJK) non-diff output — e.g. a localized
+        // `--stat` summary under a non-English locale — passes through
+        // byte-for-byte and is not misclassified as a diff.
+        let jp = "ファイル | 2 +-\n 1 個のファイルが変更されました\n".as_bytes();
+        let (is, pre) = peek_diff(jp).unwrap();
+        assert!(!is);
+        assert_eq!(pre.as_slice(), jp);
+
+        // A real diff with CJK paths/content and a localized (CJK) commit
+        // preamble is still detected: the header tokens git emits (`diff --git`,
+        // `index`, `@@`) are plumbing and never localized, so classification is
+        // charset- and locale-independent.
+        let cjk_diff =
+            "コミット abc\n作者: 田中\n\ndiff --git a/文書.txt b/文書.txt\nindex 1..2 100644\n@@ -1 +1 @@\n-你好世界\n+你好宇宙\n"
+                .as_bytes();
+        let (is, pre) = peek_diff(cjk_diff).unwrap();
+        assert!(is);
+        assert!(pre.ends_with("index 1..2 100644\n".as_bytes()));
+
         // A long non-diff stream stops at the cap instead of buffering it all.
         let mut big = Vec::new();
         while big.len() < PEEK_CAP + 4096 {

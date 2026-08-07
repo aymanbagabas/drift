@@ -434,6 +434,39 @@ index e69de29..0cfbf08 100644\n\
     }
 
     #[test]
+    fn intraline_handles_cjk_and_accents() {
+        // Multibyte content must parse intact and word-diff on char boundaries
+        // (never byte offsets): CJK words and accented Latin, with a space so
+        // the shared prefix stays unchanged and only the last word is marked.
+        let d = "diff --git a/文書.txt b/文書.txt\n\
+index 1..2 100644\n\
+--- a/文書.txt\n\
++++ b/文書.txt\n\
+@@ -1,2 +1,2 @@\n\
+-你好 世界\n\
++你好 宇宙\n\
+-café crème\n\
++café glacé\n";
+        let files = parse(d);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), "文書.txt");
+        let lines = &files[0].hunks[0].lines;
+        let cjk_add = &lines[1];
+        assert_eq!(cjk_add.content, "你好 宇宙");
+        // Segments must reassemble to the exact content — proof no multibyte
+        // char was split or dropped by the word-diff.
+        let joined: String = cjk_add.segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, cjk_add.content);
+        assert!(cjk_add.segments.iter().any(|s| s.changed && s.text.contains("宇宙")));
+        assert!(cjk_add.segments.iter().any(|s| !s.changed && s.text.contains("你好")));
+        // Accented Latin behaves the same.
+        let acc_add = &lines[3];
+        let joined: String = acc_add.segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, acc_add.content);
+        assert!(acc_add.segments.iter().any(|s| s.changed && s.text.contains("glacé")));
+    }
+
+    #[test]
     fn handles_new_and_binary() {
         let d = "diff --git a/a.png b/a.png\nnew file mode 100644\nindex 0..1\nBinary files /dev/null and b/a.png differ\n";
         let files = parse(d);
