@@ -708,6 +708,10 @@ pub struct App {
     /// (instead of blocking on EOF) and sends each finished file's parsed form,
     /// raw patch, and built rows. `None` for non-stdin sources and once done.
     stream: Option<Receiver<StreamItem>>,
+    /// Stdin bytes already read by the pre-screen peek (`peek_diff`): the diff
+    /// prefix the streamer must process before continuing to read stdin, so no
+    /// input is lost. Taken by `spawn_stream`; `None` for non-stdin sources.
+    stream_prefix: Option<Vec<u8>>,
     /// True while `stream` is still delivering files, for the loading indicator.
     loading: bool,
     /// In-flight async worktree poll: a background thread running the diff so
@@ -797,7 +801,29 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, source: Source, opts: crate::git::Opts) -> io::Result<Self> {
+    pub fn new(config: Config, source: Source, opts: crate::git::Opts) -> io::Result<Option<Self>> {
+        // Peek a piped stream BEFORE touching the terminal: if it never produces
+        // a `diff --git` (e.g. `git diff --stat`, `git show -s`), print it back
+        // verbatim and bail — the screen is never opened, so no altscreen and no
+        // raw mode. A real diff hands its already-read prefix to the streamer.
+        let stream_prefix = if matches!(source, Source::Stdin) {
+            use std::io::Write;
+            match crate::git::peek_diff(std::io::stdin().lock())? {
+                (false, raw) => {
+                    // Not a diff (e.g. `git diff --stat`): write what we read,
+                    // then stream the rest straight through like `less` — the
+                    // screen is never opened, so no altscreen and no raw mode.
+                    let mut out = std::io::stdout().lock();
+                    out.write_all(&raw)?;
+                    std::io::copy(&mut std::io::stdin().lock(), &mut out)?;
+                    out.flush()?;
+                    return Ok(None);
+                }
+                (true, prefix) => Some(prefix),
+            }
+        } else {
+            None
+        };
         let highlighter = Arc::new(Highlighter::new(&config.theme, config.syntax_enabled()));
         let theme = Theme::from_config(&config);
         // Read input/output from the controlling terminal (/dev/tty) so the
@@ -832,6 +858,7 @@ impl App {
             file_starts: Vec::new(),
             prefetch: None,
             stream: None,
+            stream_prefix,
             loading: false,
             poll_worker: None,
             rebuild_worker: None,
@@ -870,7 +897,7 @@ impl App {
             esc_taps: (0, None),
         };
         app.start();
-        Ok(app)
+        Ok(Some(app))
     }
 
     /// Initial load used at startup. For a piped diff (pager mode) this streams
@@ -911,6 +938,12 @@ impl App {
         let hl = Arc::clone(&self.highlighter);
         let intraline = self.config.intraline_enabled();
         let tab = self.config.tab_width;
+        // Lines already read by the pre-screen peek (the diff prefix). The worker
+        // replays them first, then continues from stdin's shared buffer.
+        let prefix = self.stream_prefix.take().unwrap_or_default();
+        // The peek kept bytes raw for pass-through; decode lossily for parsing
+        // (U+FFFD here only affects rendering, never the pass-through path).
+        let prefix = String::from_utf8_lossy(&prefix).into_owned();
         let (tx, rx) = channel::<StreamItem>();
         self.loading = true;
         std::thread::spawn(move || {
@@ -923,7 +956,11 @@ impl App {
                 tx.send(StreamItem { file, raw: block.to_string(), rows }).is_ok()
             };
             let mut block = String::new();
-            for line in std::io::stdin().lock().lines() {
+            // The peeked prefix already had ANSI stripped for detection but is
+            // kept raw for pass-through; strip again here so parsing sees plain
+            // text (idempotent on already-plain lines). Chained ahead of stdin.
+            let prefix_lines = prefix.lines().map(|s| Ok(s.to_string()));
+            for line in prefix_lines.chain(std::io::stdin().lock().lines()) {
                 let Ok(line) = line else { break };
                 // Git colorizes diffs it pipes to a pager; strip per line so the
                 // parser sees plain text (codes never span lines).
@@ -2538,7 +2575,10 @@ impl App {
         let sw = self.sidebar_w();
         let bx = self.body_x();
         let bw = w.saturating_sub(sw);
-        let empty = self.files.is_empty();
+        // A piped diff still streaming its first file is loading, not idle:
+        // peek already confirmed a `diff --git` is coming, so don't flash the
+        // mascot in the gap before the first file paints.
+        let empty = self.files.is_empty() && self.stream.is_none();
         if empty {
             // Body is blank; the mascot is painted last, above everything.
         } else if self.split {
