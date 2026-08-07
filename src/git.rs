@@ -60,25 +60,66 @@ fn git(args: &[&str]) -> std::io::Result<std::process::Output> {
     Command::new("git").args(args).output()
 }
 
+/// Bytes to buffer while classifying before giving up and treating the stream
+/// as non-diff. A real diff preamble (a `git show`/`log` header) is far under
+/// this; the cap bounds memory and latency for non-diff pager input.
+// ponytail: fixed 64 KiB cap; make it configurable only if a real preamble ever exceeds it.
+const PEEK_CAP: usize = 64 * 1024;
+
 /// Peek a piped stream to decide whether it's a unified diff before the TUI
-/// takes over the terminal. Reads lines until the first `diff --git` (ANSI
-/// stripped, since git may colorize) or EOF. Returns `(is_diff, consumed)`
-/// where `consumed` is the raw bytes read: on `false`, print them straight to
-/// the terminal (it wasn't a diff, e.g. `git diff --stat`); on `true`, hand
-/// them to the streamer so the already-read prefix isn't lost.
-pub fn peek_diff<R: std::io::BufRead>(mut r: R) -> std::io::Result<(bool, String)> {
-    let mut consumed = String::new();
-    let mut line = String::new();
+/// takes over the terminal. Reads lines until a `diff --git` header confirmed
+/// by a following git patch line (ANSI stripped, since git may colorize), EOF,
+/// or `PEEK_CAP` bytes. Returns `(is_diff, consumed)` with the raw bytes read:
+/// on `false`, write them back and stream the rest of stdin — it wasn't a diff
+/// (e.g. `git diff --stat`); on `true`, hand them to the streamer so the
+/// already-read prefix isn't lost. Bytes stay raw and are decoded lossily only
+/// for the check, so non-UTF-8 input (a legacy-encoded commit message, a binary
+/// stream) passes through instead of aborting.
+pub fn peek_diff<R: std::io::BufRead>(mut r: R) -> std::io::Result<(bool, Vec<u8>)> {
+    let mut consumed = Vec::new();
+    let mut pending_header = false; // saw `diff --git`, awaiting a continuation line
     loop {
-        line.clear();
-        if r.read_line(&mut line)? == 0 {
-            return Ok((false, consumed)); // EOF before any `diff --git`.
+        let start = consumed.len();
+        if r.read_until(b'\n', &mut consumed)? == 0 {
+            return Ok((false, consumed)); // EOF before a confirmed diff.
         }
-        consumed.push_str(&line);
-        if uncurses::ansi::strip::strip(&line).starts_with("diff --git") {
-            return Ok((true, consumed));
+        let head = strip_head(&consumed[start..]);
+        if pending_header {
+            // A real `diff --git` is always followed by an `index`/`@@`/mode/
+            // rename/binary line; plain prose that merely starts with those
+            // words won't be, so it isn't misrouted into the TUI.
+            if is_diff_continuation(&head) {
+                return Ok((true, consumed));
+            }
+            pending_header = false; // false alarm — keep scanning.
+        }
+        if head.starts_with("diff --git") {
+            pending_header = true;
+        }
+        if consumed.len() >= PEEK_CAP {
+            return Ok((false, consumed)); // too much preamble: treat as non-diff.
         }
     }
+}
+
+/// The ANSI-stripped first 64 chars of a line — enough to see any git header
+/// marker without running the stripper over a pathologically long line.
+fn strip_head(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let head: String = text.chars().take(64).collect();
+    uncurses::ansi::strip::strip(&head)
+}
+
+/// Whether `head` (already ANSI-stripped) begins a line git only emits inside a
+/// real `diff --git` block, used to confirm a candidate header.
+fn is_diff_continuation(head: &str) -> bool {
+    const MARKERS: [&str; 11] = [
+        "index ", "--- ", "+++ ", "@@", "old mode ", "new mode ", "new file mode ",
+        "deleted file mode ", "similarity index ", "rename ", "copy ",
+    ];
+    head.starts_with("Binary files")
+        || head.starts_with("GIT binary patch")
+        || MARKERS.iter().any(|m| head.starts_with(m))
 }
 
 /// Resolve the repository layout for the current directory, or None if not a
@@ -312,47 +353,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `peek_diff` recognizes a real unified diff (even colorized) and rejects
-    /// non-diff output like `git diff --stat`, returning the bytes it consumed
-    /// so the caller can pass them through untouched.
+    /// `peek_diff` recognizes a real unified diff (even colorized), rejects
+    /// non-diff output like `git diff --stat`, preserves bytes exactly for
+    /// pass-through (including non-UTF-8), and stops right after the header it
+    /// confirms so the streamer resumes from the next byte.
     #[test]
     fn peek_diff_detects_diff_vs_non_diff() {
-        // A unified diff: detected, prefix stops at the first `diff --git`.
+        use std::io::Read;
+
+        // A unified diff: detected once the `@@` confirms the header; the prefix
+        // carries the header *and* the confirming line, byte-for-byte.
         let diff = b"diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n";
         let (is, pre) = peek_diff(&diff[..]).unwrap();
         assert!(is);
-        assert_eq!(pre, "diff --git a/f b/f\n");
+        assert_eq!(pre.as_slice(), &b"diff --git a/f b/f\n@@ -1 +1 @@\n"[..]);
 
-        // git show preamble before the diff: still detected; prefix carries it.
-        let show = b"commit abc\nAuthor: t\n\n    msg\n\ndiff --git a/f b/f\n@@ -1 +1 @@\n";
-        let (is, pre) = peek_diff(&show[..]).unwrap();
+        // git show preamble before the diff: still detected; the prefix is the
+        // preamble plus header+confirmation, and peek must NOT over-consume —
+        // the streamer resumes from the very next byte of the shared stdin.
+        let show = b"commit abc\nAuthor: t\n\n    msg\n\ndiff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n";
+        let mut rest = &show[..];
+        let (is, pre) = peek_diff(&mut rest).unwrap();
         assert!(is);
-        assert!(pre.starts_with("commit abc"));
-        assert!(pre.ends_with("diff --git a/f b/f\n"));
+        assert!(pre.starts_with(b"commit abc"));
+        assert!(pre.ends_with(b"@@ -1 +1 @@\n"));
+        let mut tail = Vec::new();
+        rest.read_to_end(&mut tail).unwrap();
+        assert_eq!(tail.as_slice(), &b"-a\n+b\n"[..], "peek must stop after the confirmation line");
 
         // Non-diff (--stat): not detected; all bytes consumed for pass-through.
         let stat = b" f | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n";
         let (is, pre) = peek_diff(&stat[..]).unwrap();
         assert!(!is);
-        assert_eq!(pre.as_bytes(), stat);
+        assert_eq!(pre.as_slice(), &stat[..]);
 
-        // Colorized `diff --git` (git's pager coloring) is still detected, and
-        // the consumed bytes keep their ANSI codes for faithful pass-through.
-        let colored = b"\x1b[1mdiff --git a/f b/f\x1b[m\n";
+        // Non-UTF-8 bytes must pass through byte-for-byte, not abort drift.
+        let bin = b"plain\xff\xfe stat bytes\n";
+        let (is, pre) = peek_diff(&bin[..]).unwrap();
+        assert!(!is, "invalid UTF-8 must not be misclassified");
+        assert_eq!(pre.as_slice(), &bin[..], "non-UTF-8 bytes must survive pass-through");
+
+        // Ordinary prose that merely contains a `diff --git ...` line is NOT a
+        // diff (no git continuation line follows) — it passes through untouched.
+        let prose = b"ordinary text\ndiff --git not actually a patch\nmore text\n";
+        let (is, pre) = peek_diff(&prose[..]).unwrap();
+        assert!(!is, "prose containing `diff --git` must not open the TUI");
+        assert_eq!(pre.as_slice(), &prose[..]);
+
+        // Combined merge diff (`diff --cc`) is passed through: the parser only
+        // splits on `diff --git`, so this is a deliberate decision, not a bug.
+        let cc = b"diff --cc f\n@@@ -1,1 -1,1 +1,1 @@@\n";
+        let (is, _) = peek_diff(&cc[..]).unwrap();
+        assert!(!is);
+
+        // Colorized `diff --git` (git's pager coloring), confirmed by `index`:
+        // detected, and the consumed bytes keep their ANSI codes.
+        let colored = b"\x1b[1mdiff --git a/f b/f\x1b[m\nindex 00..11 100644\n";
         let (is, pre) = peek_diff(&colored[..]).unwrap();
         assert!(is);
-        assert_eq!(pre.as_bytes(), colored, "ANSI codes must survive in the prefix");
+        assert_eq!(pre.as_slice(), &colored[..], "ANSI codes must survive in the prefix");
 
-        // Non-diff with ANSI (e.g. colorized `--stat`): rejected, and every byte
-        // — escape codes included — is preserved so pass-through keeps color.
+        // Non-diff with ANSI (colorized `--stat`): rejected, every byte — escape
+        // codes included — preserved so pass-through keeps color.
         let colored_stat = b" f | 2 \x1b[32m+\x1b[m\x1b[31m-\x1b[m\n";
         let (is, pre) = peek_diff(&colored_stat[..]).unwrap();
         assert!(!is);
-        assert_eq!(pre.as_bytes(), colored_stat, "ANSI codes must survive pass-through");
+        assert_eq!(pre.as_slice(), &colored_stat[..], "ANSI codes must survive pass-through");
 
         // Empty stream: not a diff, nothing consumed.
         let (is, pre) = peek_diff(&b""[..]).unwrap();
         assert!(!is);
         assert!(pre.is_empty());
+
+        // A long non-diff stream stops at the cap instead of buffering it all.
+        let mut big = Vec::new();
+        while big.len() < PEEK_CAP + 4096 {
+            big.extend_from_slice(b"just some non-diff output line\n");
+        }
+        let total = big.len();
+        let (is, pre) = peek_diff(&big[..]).unwrap();
+        assert!(!is);
+        assert!(pre.len() >= PEEK_CAP && pre.len() < total, "peek must stop at the cap");
     }
 }

@@ -711,7 +711,7 @@ pub struct App {
     /// Stdin bytes already read by the pre-screen peek (`peek_diff`): the diff
     /// prefix the streamer must process before continuing to read stdin, so no
     /// input is lost. Taken by `spawn_stream`; `None` for non-stdin sources.
-    stream_prefix: Option<String>,
+    stream_prefix: Option<Vec<u8>>,
     /// True while `stream` is still delivering files, for the loading indicator.
     loading: bool,
     /// In-flight async worktree poll: a background thread running the diff so
@@ -810,7 +810,13 @@ impl App {
             use std::io::Write;
             match crate::git::peek_diff(std::io::stdin().lock())? {
                 (false, raw) => {
-                    std::io::stdout().write_all(raw.as_bytes())?;
+                    // Not a diff (e.g. `git diff --stat`): write what we read,
+                    // then stream the rest straight through like `less` — the
+                    // screen is never opened, so no altscreen and no raw mode.
+                    let mut out = std::io::stdout().lock();
+                    out.write_all(&raw)?;
+                    std::io::copy(&mut std::io::stdin().lock(), &mut out)?;
+                    out.flush()?;
                     return Ok(None);
                 }
                 (true, prefix) => Some(prefix),
@@ -935,6 +941,9 @@ impl App {
         // Lines already read by the pre-screen peek (the diff prefix). The worker
         // replays them first, then continues from stdin's shared buffer.
         let prefix = self.stream_prefix.take().unwrap_or_default();
+        // The peek kept bytes raw for pass-through; decode lossily for parsing
+        // (U+FFFD here only affects rendering, never the pass-through path).
+        let prefix = String::from_utf8_lossy(&prefix).into_owned();
         let (tx, rx) = channel::<StreamItem>();
         self.loading = true;
         std::thread::spawn(move || {
