@@ -3369,18 +3369,29 @@ fn sticky_at(
     out
 }
 
-/// The furthest the document can scroll: the offset that rests the last row at
-/// the bottom of the body. Free-standing and scroll-independent so the bound is
-/// a fixed point.
+/// The furthest the document can scroll: an offset that keeps the last row
+/// visible at the bottom of the body. Free-standing and, crucially,
+/// **scroll-independent** — it's a pure function of the content and body height,
+/// never of the live scroll, which is what stops the viewport jittering.
 ///
 /// Sticky headers pinned at the top eat body rows, so the bottom offset must
 /// reach past `n - body_h` to reveal the final lines. The band height depends
 /// on the offset it produces — and the instant a hunk header lands on the top
-/// line the band loses a row — so deriving this bound from the live scroll
-/// makes it flip by one at the very bottom and the viewport jitters up and
-/// down. Evaluate the band at a fixed reference instead and reserve the larger
-/// of the two candidate heights, so the last line is always reachable and the
-/// bound never shifts under us.
+/// line the band loses a row — so at that boundary **no offset is
+/// self-consistent** (`s == n + sticky(s) - body_h` has no solution: the
+/// recurrence 2-cycles between a 1- and 2-row band). That non-existence is
+/// exactly what made a live-scroll bound flip back and forth.
+///
+/// Since a true fixed point can't exist there without pinning a header on top of
+/// its own visible line (a duplicate-header regression across all scrolling), we
+/// pick the stable, safe side: evaluate the band at a fixed reference and
+/// reserve the larger of the two candidate heights. Guarantees:
+///
+/// - the bound never depends on the live scroll (no jitter), and
+/// - the last row is always visible (never hidden off the bottom),
+///
+/// at the cost of **at most one blank row** below the last line in the rare case
+/// a hunk header lands exactly on the boundary. See the tests for both.
 fn max_scroll_for(kinds: &[RowKind], file_starts: &[usize], body_h: usize) -> usize {
     let n = kinds.len();
     if n <= body_h || body_h == 0 {
@@ -3803,32 +3814,53 @@ mod tests {
     }
 
     #[test]
-    fn max_scroll_is_a_fixed_point_at_the_bottom() {
-        use super::{max_scroll_for, sticky_at, RowKind::*};
-        // A file whose last hunk header sits right where it would land on the
-        // top line at the bottom — the exact spot the old bound flipped ±1.
-        // Rows 0=File, 1=Hunk, then content, a second Hunk deep down, more
-        // content to the end.
-        let mut kinds = vec![File, Hunk];
-        kinds.extend(std::iter::repeat(Context).take(8)); // rows 2..=9
-        kinds.push(Hunk); // row 10
-        kinds.extend(std::iter::repeat(Context).take(6)); // rows 11..=16
+    fn max_scroll_keeps_last_line_visible_without_jitter() {
+        use super::{max_scroll_for, sticky_at, RowKind, RowKind::*};
+
+        // Contract for a layout: the bound keeps the last row visible and
+        // leaves at most one blank row below it. Returns the blank-row count.
+        // (The bound is scroll-independent by construction — the function takes
+        // no scroll — which is what removes the jitter; we assert idempotence.)
+        fn check(kinds: &[RowKind], starts: &[usize], body_h: usize) -> isize {
+            let n = kinds.len();
+            let m = max_scroll_for(kinds, starts, body_h);
+            assert_eq!(m, max_scroll_for(kinds, starts, body_h), "bound must be pure");
+            let k = sticky_at(kinds, starts, m, body_h).len();
+            let last_visible = m as isize + (body_h as isize - k as isize) - 1;
+            assert!(last_visible >= n as isize - 1, "last line hidden at the bottom");
+            let blank = last_visible - (n as isize - 1);
+            assert!((0..=1).contains(&blank), "over-reserved by {blank} rows");
+            blank
+        }
+
         let starts = [0usize];
         let body_h = 8;
-        let n = kinds.len(); // 17
 
-        let max = max_scroll_for(&kinds, &starts, body_h);
+        // Non-boundary: second hunk at row 10, cand lands on plain content, the
+        // band stays 2 → the last line rests flush at the bottom, no blank.
+        let mut a = vec![File, Hunk];
+        a.extend(std::iter::repeat(Context).take(8)); // rows 2..=9
+        a.push(Hunk); // row 10
+        a.extend(std::iter::repeat(Context).take(6)); // rows 11..=16
+        assert_eq!(check(&a, &starts, body_h), 0, "flush bottom expected");
 
-        // The bound must be a fixed point: standing at `max`, the sticky band it
-        // produces must not push the bound anywhere else (this is what stops the
-        // jitter). Reserve = band height at `max`.
-        let k = sticky_at(&kinds, &starts, max, body_h).len();
-        assert_eq!(max, (n + k).saturating_sub(body_h), "bound flips under its own sticky band");
+        // Reviewer's boundary: second hunk at row 11 (== cand). There the band
+        // drops to 1, so the last line is still visible but one row up. We
+        // accept that single blank row because at this boundary NO offset is
+        // self-consistent — proven by exhaustion below — so a true fixed point
+        // is impossible without a duplicate-header rendering regression.
+        let mut b = vec![File, Hunk];
+        b.extend(std::iter::repeat(Context).take(9)); // rows 2..=10
+        b.push(Hunk); // row 11
+        b.extend(std::iter::repeat(Context).take(5)); // rows 12..=16
+        assert_eq!(check(&b, &starts, body_h), 1, "one blank row at the boundary");
 
-        // The last row must be reachable — visible within the body at `max`.
-        assert!(max + (body_h - k) >= n, "last line hidden at the bottom");
-        // And we never over-reserve by more than a row.
-        assert!(max <= n - body_h + 2);
+        let n = b.len();
+        let consistent = (0..n).any(|s| {
+            let k = sticky_at(&b, &starts, s, body_h).len();
+            s as isize == n as isize + k as isize - body_h as isize
+        });
+        assert!(!consistent, "no self-consistent offset should exist here");
     }
 
     #[test]
