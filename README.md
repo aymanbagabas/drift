@@ -97,7 +97,7 @@ drift -A                  # ...and untracked files too
 drift --staged            # what's staged (alias: --cached)
 drift HEAD~3              # a single commit
 drift main..feature       # a range
-drift -w                  # watch the repo and refresh on every change
+drift -w                  # watch the repo and refresh on every change (great alongside AI coding agents)
 git diff | drift          # pager mode: read a diff from stdin
 ```
 
