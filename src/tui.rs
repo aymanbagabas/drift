@@ -1323,7 +1323,8 @@ impl App {
     }
 
     fn max_scroll(&self) -> usize {
-        self.rows().len().saturating_sub(self.viewport_rows())
+        let kinds: Vec<RowKind> = self.rows().iter().map(|r| r.kind).collect();
+        max_scroll_for(&kinds, &self.file_starts, self.body_h_screen())
     }
 
     /// Scroll the viewport by `delta` rows without moving the cursor, clamped to
@@ -3368,6 +3369,29 @@ fn sticky_at(
     out
 }
 
+/// The furthest the document can scroll: the offset that rests the last row at
+/// the bottom of the body. Free-standing and scroll-independent so the bound is
+/// a fixed point.
+///
+/// Sticky headers pinned at the top eat body rows, so the bottom offset must
+/// reach past `n - body_h` to reveal the final lines. The band height depends
+/// on the offset it produces — and the instant a hunk header lands on the top
+/// line the band loses a row — so deriving this bound from the live scroll
+/// makes it flip by one at the very bottom and the viewport jitters up and
+/// down. Evaluate the band at a fixed reference instead and reserve the larger
+/// of the two candidate heights, so the last line is always reachable and the
+/// bound never shifts under us.
+fn max_scroll_for(kinds: &[RowKind], file_starts: &[usize], body_h: usize) -> usize {
+    let n = kinds.len();
+    if n <= body_h || body_h == 0 {
+        return 0;
+    }
+    let k1 = sticky_at(kinds, file_starts, n - body_h, body_h).len();
+    let cand = (n + k1).saturating_sub(body_h);
+    let k2 = sticky_at(kinds, file_starts, cand, body_h).len();
+    (n + k1.max(k2)).saturating_sub(body_h)
+}
+
 /// One file delivered by the stdin streamer (`spawn_stream`): its parsed form,
 /// raw patch text, and pre-built rows, ready for `drain_stream` to append.
 struct StreamItem {
@@ -3776,6 +3800,43 @@ mod tests {
         assert_eq!(file_of_row(&starts, 11), 1);
         assert_eq!(file_of_row(&starts, 12), 2); // last file's header
         assert_eq!(file_of_row(&starts, 99), 2); // past the end stays in last
+    }
+
+    #[test]
+    fn max_scroll_is_a_fixed_point_at_the_bottom() {
+        use super::{max_scroll_for, sticky_at, RowKind::*};
+        // A file whose last hunk header sits right where it would land on the
+        // top line at the bottom — the exact spot the old bound flipped ±1.
+        // Rows 0=File, 1=Hunk, then content, a second Hunk deep down, more
+        // content to the end.
+        let mut kinds = vec![File, Hunk];
+        kinds.extend(std::iter::repeat(Context).take(8)); // rows 2..=9
+        kinds.push(Hunk); // row 10
+        kinds.extend(std::iter::repeat(Context).take(6)); // rows 11..=16
+        let starts = [0usize];
+        let body_h = 8;
+        let n = kinds.len(); // 17
+
+        let max = max_scroll_for(&kinds, &starts, body_h);
+
+        // The bound must be a fixed point: standing at `max`, the sticky band it
+        // produces must not push the bound anywhere else (this is what stops the
+        // jitter). Reserve = band height at `max`.
+        let k = sticky_at(&kinds, &starts, max, body_h).len();
+        assert_eq!(max, (n + k).saturating_sub(body_h), "bound flips under its own sticky band");
+
+        // The last row must be reachable — visible within the body at `max`.
+        assert!(max + (body_h - k) >= n, "last line hidden at the bottom");
+        // And we never over-reserve by more than a row.
+        assert!(max <= n - body_h + 2);
+    }
+
+    #[test]
+    fn max_scroll_zero_when_everything_fits() {
+        use super::{max_scroll_for, RowKind::*};
+        let kinds = [File, Hunk, Context, Context];
+        assert_eq!(max_scroll_for(&kinds, &[0], 10), 0); // body taller than doc
+        assert_eq!(max_scroll_for(&kinds, &[0], 4), 0); // exact fit
     }
 
     #[test]
