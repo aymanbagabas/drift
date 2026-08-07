@@ -2566,7 +2566,10 @@ impl App {
         let sw = self.sidebar_w();
         let bx = self.body_x();
         let bw = w.saturating_sub(sw);
-        let empty = self.files.is_empty();
+        // A piped diff still streaming its first file is loading, not idle:
+        // peek already confirmed a `diff --git` is coming, so don't flash the
+        // mascot in the gap before the first file paints.
+        let empty = self.files.is_empty() && self.stream.is_none();
         if empty {
             // Body is blank; the mascot is painted last, above everything.
         } else if self.split {
