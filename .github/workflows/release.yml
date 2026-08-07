@@ -34,10 +34,10 @@ jobs:
           brew install fury-cli
           fury --version
 
-      # AUR regularly goes down for maintenance. Probe the SSH endpoint first;
-      # if it's unreachable, tell GoReleaser to skip the aur publisher so the
-      # rest of the release still ships. ssh exit 255 == transport/auth failure
-      # (AUR down or key missing); any other code means we reached the AUR shell.
+      # AUR regularly goes down for maintenance (and sometimes answers ssh but
+      # not git). Probe with the exact operation GoReleaser performs — a git
+      # read of the package repo. If it fails for any reason, tell GoReleaser
+      # to skip the aur publisher so the rest of the release still ships.
       - name: Check AUR availability
         id: aur
         env:
@@ -47,12 +47,11 @@ jobs:
           printf '%s\n' "$AUR_KEY" > "$key"
           chmod 600 "$key"
           rc=0
-          ssh -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=15 -o BatchMode=yes \
-              aur@aur.archlinux.org help >/dev/null 2>&1 || rc=$?
+          GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes" \
+            git ls-remote ssh://aur@aur.archlinux.org/drift-diff-bin.git >/dev/null 2>&1 || rc=$?
           rm -f "$key"
-          if [ "$rc" -eq 255 ]; then
-            echo "::warning title=AUR skipped::AUR unreachable (ssh rc=255) — skipping the aur publisher; publish it manually once AUR is back."
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning title=AUR skipped::AUR unreachable (git ls-remote rc=$rc) — skipping the aur publisher; publish it manually once AUR is back."
             echo "skip=--skip=aur" >> "$GITHUB_OUTPUT"
           else
             echo "skip=" >> "$GITHUB_OUTPUT"
