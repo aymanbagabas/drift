@@ -32,7 +32,7 @@ jobs:
           brew tap gemfury/tap
           brew trust gemfury/tap
           brew install fury-cli
-          fury version
+          fury --version
 
       # AUR regularly goes down for maintenance. Probe the SSH endpoint first;
       # if it's unreachable, tell GoReleaser to skip the aur publisher so the
