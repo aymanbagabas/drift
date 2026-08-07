@@ -258,7 +258,7 @@ For the full list of every setting, color, component style, and flag, see
 
 ## Built with
 
-drift's terminal UI is powered by [uncurses](https://github.com/aymanbagabas/uncurses).
+drift's terminal UI is powered by [uncurses](https://github.com/aymanbagabas/uncurses), and its multi-channel releases are cut with [GoReleaser](https://goreleaser.com).
 
 ## License
 
