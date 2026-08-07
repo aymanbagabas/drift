@@ -97,9 +97,12 @@ drift -A                  # ...and untracked files too
 drift --staged            # what's staged (alias: --cached)
 drift HEAD~3              # a single commit
 drift main..feature       # a range
-drift -w                  # watch the repo and refresh on every change (great alongside AI coding agents)
+drift -w                  # watch the repo and refresh on every change
 git diff | drift          # pager mode: read a diff from stdin
 ```
+
+> [!TIP]
+> Pair it with an AI agent. Leave `drift -w` open in a split while an agent (Copilot, Claude, etc.) works, every edit lands on screen instantly. Press <kbd>w</kbd> to freeze the view when you want to read, and again to resume.
 
 Make it your default git diff pager:
 
