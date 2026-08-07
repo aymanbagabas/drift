@@ -46,10 +46,10 @@ jobs:
           key="$(mktemp)"
           printf '%s\n' "$AUR_KEY" > "$key"
           chmod 600 "$key"
+          rc=0
           ssh -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
               -o ConnectTimeout=15 -o BatchMode=yes \
-              aur@aur.archlinux.org help >/dev/null 2>&1
-          rc=$?
+              aur@aur.archlinux.org help >/dev/null 2>&1 || rc=$?
           rm -f "$key"
           if [ "$rc" -eq 255 ]; then
             echo "::warning title=AUR skipped::AUR unreachable (ssh rc=255) — skipping the aur publisher; publish it manually once AUR is back."
