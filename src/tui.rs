@@ -105,7 +105,13 @@ impl Theme {
             statusbar_watch: sty("statusbar-watch", "background add bold"),
             statusbar_help: sty("statusbar-help", "background secondary bold"),
             help_key: sty("help-key", "muted bold"),
-            help_desc: sty("help-desc", "muted faint"),
+            // The `ansi` theme's `muted` is `brightblack`, too dim for the help
+            // descriptions on many terminals. Use the terminal's own foreground
+            // with no color and no faint — just the plain default.
+            help_desc: sty(
+                "help-desc",
+                if c.theme == "ansi" { "default" } else { "muted faint" },
+            ),
             dialog: sty("dialog", "foreground background"),
             dialog_border: sty("dialog-border", "surface"),
             sidebar_border: sty("sidebar-border", "surface"),
@@ -3657,6 +3663,20 @@ mod tests {
 
     fn slice_h(s: &str, skip: u16, width: u16) -> (String, u16) {
         slice_fit(grapheme_cells(s, WidthMode::Grapheme, false), skip, width)
+    }
+
+    #[test]
+    fn ansi_help_desc_uses_terminal_default_fg() {
+        use super::Theme;
+        use crate::config::Config;
+        // ansi: help descriptions ride the terminal's own foreground (no color).
+        let mut ansi = Config::default();
+        ansi.set_theme("ansi");
+        assert_eq!(Theme::from_config(&ansi).help_desc.fg, None);
+        // a colored theme keeps its muted hue.
+        let mut od = Config::default();
+        od.set_theme("onedark");
+        assert!(Theme::from_config(&od).help_desc.fg.is_some());
     }
 
     #[test]
