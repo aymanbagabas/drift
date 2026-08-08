@@ -804,6 +804,14 @@ pub struct App {
     mascot_pinned: bool,
     /// Timestamps of recent Esc taps, for detecting the triple-tap toggle.
     esc_taps: (u8, Option<Instant>),
+    /// First-run theme picker: the fuzzy query and the selected row within the
+    /// currently filtered list. Only live while the setup screen is showing.
+    setup_query: String,
+    setup_sel: usize,
+    /// Cached preview for the hovered entry, rebuilt only when the hovered
+    /// theme changes: its config + theme (swapped in while drawing) and the
+    /// sample diff already parsed into rows by the real pipeline.
+    setup_preview: Option<(String, Config, Theme, Vec<Row>)>,
 }
 
 impl App {
@@ -839,18 +847,7 @@ impl App {
             mouse: Some(MouseTracking::empty()),
             ..ScreenOptions::default()
         })?;
-        screen.enter_alt_screen()?;
-        screen.hide_cursor()?;
-        // Paint the whole terminal in the theme's background so unwritten gaps
-        // match the diff body. Skipped when the theme rides the terminal's own
-        // background (e.g. the `ansi` theme). uncurses resets this on finish().
-        if let Some(c) = theme.background {
-            screen.set_background_color(c)?;
-        }
-        // Enable mouse now rather than waiting for the capability-query reply,
-        // so clicks and wheel work immediately (and in non-interactive tests).
-        screen.enable_mouse(MouseTracking::empty())?;
-        let mut app = App {
+        let app = App {
             screen,
             config,
             theme,
@@ -901,9 +898,53 @@ impl App {
             mascot_grab: None,
             mascot_pinned: false,
             esc_taps: (0, None),
+            setup_query: String::new(),
+            setup_sel: 0,
+            setup_preview: None,
         };
-        app.start();
         Ok(Some(app))
+    }
+
+    /// Prepare a freshly-constructed app for its run loop: offer the first-run
+    /// theme picker inline, then switch to the alt screen for the diff and kick
+    /// off the initial load. Returns `false` when the user quit during setup
+    /// (Ctrl+C), so the caller skips the run loop — but must still call
+    /// [`finish`](Self::finish), since `Screen` has no `Drop` and the terminal
+    /// would otherwise be left in raw mode.
+    pub fn init(&mut self) -> io::Result<bool> {
+        // First run with no config at all: offer the theme picker *inline* in
+        // the primary screen. Only once it's done (or skipped) do we switch to
+        // the alt screen for the diff — so setup reads as a normal prompt, not
+        // a full-screen takeover.
+        if crate::config::should_offer_setup() {
+            let quit = self.run_setup()?;
+            // Collapse the inline picker to zero height and flush, cleaning it
+            // out of the normal buffer before we either leave or switch to the
+            // alt screen.
+            let w = self.screen.width();
+            self.screen.resize((w, 0));
+            self.screen.render()?;
+            if quit {
+                return Ok(false);
+            }
+        }
+        // Switch to full-screen for the diff: enter the alt screen, then resize
+        // the managed area from the picker's inline height back to the whole
+        // terminal viewport.
+        self.screen.enter_alt_screen()?;
+        self.screen.autoresize()?;
+        self.screen.hide_cursor()?;
+        // Paint the whole terminal in the theme's background so unwritten gaps
+        // match the diff body. Skipped when the theme rides the terminal's own
+        // background (e.g. the `ansi` theme). uncurses resets this on finish().
+        if let Some(c) = self.theme.background {
+            self.screen.set_background_color(c)?;
+        }
+        // Enable mouse now rather than waiting for the capability-query reply,
+        // so clicks and wheel work immediately (and in non-interactive tests).
+        self.screen.enable_mouse(MouseTracking::empty())?;
+        self.start();
+        Ok(true)
     }
 
     /// Initial load used at startup. For a piped diff (pager mode) this streams
@@ -934,6 +975,250 @@ impl App {
             }
         }
         self.spawn_prefetch();
+    }
+
+    /// Theme indices (into `config::THEME_NAMES`) matching the current fuzzy
+    /// query, in rank order.
+    fn setup_filtered(&self) -> Vec<usize> {
+        crate::config::fuzzy_filter(&self.setup_query, crate::config::THEME_NAMES)
+    }
+
+    /// Blocking first-run theme picker: an fzf-style list with a live preview,
+    /// driven by its own input loop. Returns Ok(true) if the user asked to quit
+    /// the app (Ctrl+C), Ok(false) after they pick (Enter, applies + saves) or
+    /// skip (Esc, keeps the default and asks again next run).
+    fn run_setup(&mut self) -> io::Result<bool> {
+        self.setup_query.clear();
+        self.setup_sel = 0;
+        self.screen.show_cursor()?;
+        let quit = loop {
+            self.render_setup()?;
+            if !self.screen.poll_event(Some(Duration::from_millis(200)))? {
+                continue;
+            }
+            let mut done: Option<bool> = None;
+            while let Some(ev) = self.screen.try_read_event() {
+                // A terminal resize doesn't refresh the cached window size on
+                // its own; re-query so the next render recomputes the inline
+                // height against the new terminal.
+                if matches!(ev, Event::Resize(_)) {
+                    self.screen.autoresize()?;
+                    break;
+                }
+                let Event::KeyPress(k) = ev else { continue };
+                // Suspend to the shell like the main loop; uncurses restores the
+                // terminal, raises SIGTSTP, and resumes+repaints on `fg`. In raw
+                // mode the kernel won't do this for us. Unix-only (no SIGTSTP on
+                // Windows).
+                #[cfg(unix)]
+                if k.matches("ctrl+z") {
+                    self.screen.suspend()?;
+                    self.screen.resume()?;
+                    self.screen.show_cursor()?;
+                    break; // re-render on the next loop turn
+                }
+                if k.matches("ctrl+c") {
+                    done = Some(true);
+                    break;
+                }
+                if k.matches("escape") {
+                    done = Some(false);
+                    break;
+                }
+                if k.matches("enter") {
+                    let filtered = self.setup_filtered();
+                    if let Some(&ti) = filtered.get(self.setup_sel) {
+                        let name = crate::config::THEME_NAMES[ti];
+                        self.apply_theme(name);
+                        let _ = crate::config::save_theme(name);
+                    }
+                    done = Some(false);
+                    break;
+                }
+                if k.matches("up") {
+                    self.setup_move(-1);
+                } else if k.matches("down") {
+                    self.setup_move(1);
+                } else if k.matches("backspace") {
+                    self.setup_query.pop();
+                    self.setup_sel = 0;
+                } else if let Some(t) = typed_text(&k) {
+                    self.setup_query.push_str(&t);
+                    self.setup_sel = 0;
+                }
+            }
+            if let Some(v) = done {
+                break v;
+            }
+        };
+        // Restore the diff view's hidden cursor and stop steering it.
+        self.screen.clear_cursor_position();
+        self.screen.hide_cursor()?;
+        Ok(quit)
+    }
+
+    fn setup_move(&mut self, delta: isize) {
+        let n = self.setup_filtered().len();
+        if n == 0 {
+            self.setup_sel = 0;
+            return;
+        }
+        self.setup_sel = (self.setup_sel as isize + delta).clamp(0, n as isize - 1) as usize;
+    }
+
+    /// Adopt `name` as the session theme: re-derive the palette, rebuild the
+    /// highlighter, and repaint the terminal background. Called when the picker
+    /// confirms, before the document is built.
+    fn apply_theme(&mut self, name: &str) {
+        self.config.set_theme(name);
+        self.highlighter =
+            Arc::new(Highlighter::new(&self.config.theme, self.config.syntax_enabled()));
+        self.theme = Theme::from_config(&self.config);
+        if let Some(c) = self.theme.background {
+            let _ = self.screen.set_background_color(c);
+        }
+    }
+
+    /// Draw the first-run theme picker inline: a lean fzf-style prompt, the
+    /// filtered theme list, a live preview of a sample diff in the hovered
+    /// theme, and a help line. No header — it reads as an inline picker.
+    ///
+    /// The managed area is resized every frame to `max(content_rows,
+    /// terminal_height)`: exactly the rows we draw, but never shorter than the
+    /// terminal. Making it at least a full screen pins the inline origin to the
+    /// top, so when the content is taller than the terminal it clips from the
+    /// bottom (losing the preview/help) rather than scrolling the prompt off
+    /// the top.
+    fn render_setup(&mut self) -> io::Result<()> {
+        let plain = Style::default();
+        let bold = Style::default().bold();
+        let dim = Style::default().faint();
+        let key_style = self.theme.help_key.clone();
+        let desc_style = self.theme.help_desc.clone();
+
+        let filtered = self.setup_filtered();
+        self.setup_sel = self.setup_sel.min(filtered.len().saturating_sub(1));
+
+        // Managed-area height: the rows we draw, but never taller than the
+        // terminal. When the content is taller than the terminal, capping at the
+        // terminal height keeps the top (prompt + list) anchored and clips the
+        // preview/help off the bottom, instead of scrolling the top away.
+        let list_win = filtered.len().max(1) as u16;
+        let content_rows = 16 + list_win;
+        let term = self
+            .screen
+            .window_cells()
+            .unwrap_or_else(|| uncurses::layout::Size::new(self.screen.width(), self.screen.height()));
+        let w = term.width;
+        let h = content_rows.min(term.height);
+        self.screen.resize((w, h));
+        self.screen.clear();
+        if w < 40 {
+            self.screen
+                .set_str((0, 0), "window too narrow — press Esc to skip", Style::default());
+            return self.screen.render();
+        }
+
+        // Hint above the selector, multi-lined: what this is, where it saves,
+        // that it stays customizable, and a clickable docs link on its own line.
+        // set_str truncates at the surface's right edge, so long lines are
+        // clipped, not wrapped — no manual width math needed.
+        let path = crate::config::config_write_path_display();
+        self.screen
+            .set_str((2, 0), &format!("Pick a theme for drift — saved to {path}"), dim.clone());
+        self.screen.set_str(
+            (2, 1),
+            "Customizable later: edit the config or add your own theme.",
+            dim.clone(),
+        );
+        let url = "https://github.com/aymanbagabas/drift";
+        self.screen.set_str((2, 2), "Docs: ", dim.clone());
+        self.screen
+            .set_str((2 + self.width("Docs: "), 2), url, dim.clone().link(url, "id=drift-docs"));
+
+        // fzf-style prompt; the real terminal cursor sits at the query end.
+        let prompt_y = 4u16;
+        self.screen
+            .set_str((2, prompt_y), &format!("❯ {}", self.setup_query), plain.clone());
+        let cursor_x = 2 + self.width("❯ ") + self.width(&self.setup_query);
+        self.screen.set_cursor_position((cursor_x.min(w.saturating_sub(1)), prompt_y));
+
+        // Every filtered theme, one per row (the managed area grew to fit them).
+        let list_top = prompt_y + 2; // blank line after the prompt
+        for (i, &ti) in filtered.iter().enumerate() {
+            let name = crate::config::THEME_NAMES[ti];
+            let y = list_top + i as u16;
+            let selected = i == self.setup_sel;
+            let marker = if selected { "▸ " } else { "  " };
+            let style = if selected { bold.clone() } else { plain.clone() };
+            self.screen.set_str((2, y), &format!("{marker}{name}"), style);
+            if name == "ansi" {
+                let nx = 2 + 2 + self.width(name) + 2;
+                self.screen
+                    .set_str((nx, y), "terminal colors · no syntax highlighting", dim.clone());
+            }
+        }
+        if filtered.is_empty() {
+            self.screen
+                .set_str((2, list_top), "(no themes match — Esc to skip)", dim.clone());
+        }
+
+        // Live preview of the hovered theme, right after the items. Built once
+        // per theme through the real diff pipeline and drawn with that theme
+        // swapped in, so add/remove colors and word-diff emphasis match the
+        // actual view exactly — including ansi, which has no syntax fg and (by
+        // config) no word-diff emphasis.
+        let preview_h: u16 = 7; // 1 label + 6 sample rows
+        let hovered = filtered
+            .get(self.setup_sel)
+            .map(|&ti| crate::config::THEME_NAMES[ti])
+            .unwrap_or("ansi");
+        if self.setup_preview.as_ref().map(|(n, ..)| n.as_str()) != Some(hovered) {
+            let mut cfg = Config::default();
+            cfg.set_theme(hovered);
+            let th = Theme::from_config(&cfg);
+            let hl = Highlighter::new(hovered, cfg.syntax_enabled());
+            let files = diff::parse(SETUP_PREVIEW_DIFF);
+            let (rows, _) = assemble_document(&files, &hl, cfg.intraline_enabled(), cfg.tab_width);
+            self.setup_preview = Some((hovered.to_string(), cfg, th, rows));
+        }
+        let preview_top = list_top + list_win + 1; // blank after items
+        self.screen.set_str((2, preview_top), "Preview", dim.clone());
+        let mut preview = self.setup_preview.take();
+        if let Some((_, cfg, th, rows)) = preview.as_mut() {
+            // Swap the hovered theme/config in for the duration of the draw so
+            // draw_diff_row renders exactly as the real view would.
+            std::mem::swap(&mut self.config, cfg);
+            std::mem::swap(&mut self.theme, th);
+            let pw = w.saturating_sub(4);
+            for (i, r) in rows.iter().enumerate() {
+                let y = preview_top + 1 + i as u16;
+                if y >= h {
+                    break;
+                }
+                // Fall back to the theme's own background so context rows (and
+                // any gaps) fill with it too — the real view sets the whole
+                // screen to this bg, so without it the preview looks patchy.
+                let row_bg = self.row_wash(r.kind).or(self.theme.background);
+                self.draw_diff_row(r, 2, pw, y, row_bg, Gut::Both);
+            }
+            std::mem::swap(&mut self.config, cfg);
+            std::mem::swap(&mut self.theme, th);
+        }
+        self.setup_preview = preview;
+
+        // Action keys, styled like the main help grid (help_key / help_desc).
+        let help_y = preview_top + preview_h + 1;
+        if help_y < h {
+            let mut x = 2u16;
+            for (k, v) in [("enter", "save"), ("esc", "skip"), ("↑/↓", "move"), ("type", "filter")] {
+                self.screen.set_str((x, help_y), k, key_style.clone());
+                x += self.width(k) + 1;
+                self.screen.set_str((x, help_y), v, desc_style.clone());
+                x += self.width(v) + 3;
+            }
+        }
+        self.screen.render()
     }
 
     /// Stream a piped diff from stdin, emitting each file as its `diff --git`
@@ -3328,6 +3613,18 @@ fn expand_tabs(spans: &mut [Span], tab: usize) {
 fn base_fg(style: &Style) -> Option<Color> {
     style.fg
 }
+
+/// A tiny real diff rendered in the first-run picker's preview pane: a partial
+/// line change so word-diff emphasis shows on themes that enable it.
+const SETUP_PREVIEW_DIFF: &str = "diff --git a/greeting.rs b/greeting.rs\n\
+index 1234567..89abcde 100644\n\
+--- a/greeting.rs\n\
++++ b/greeting.rs\n\
+@@ -1,3 +1,3 @@\n\
+ fn greet(name: &str) {\n\
+-    println!(\"hi there\");\n\
++    println!(\"hello there\");\n\
+ }\n";
 
 /// Flatten a single file diff into styled display rows. Free-standing so it can
 /// run on the startup prefetch thread as well as the lazy main-thread path.

@@ -160,7 +160,14 @@ fn run() -> std::io::Result<()> {
     let Some(mut app) = tui::App::new(cfg, source, opts)? else {
         return Ok(()); // stdin wasn't a diff: peek printed it and bailed.
     };
-    let result = app.run(refresh, cli.watch, Duration::from_millis(cli.poll_interval));
+    // init() runs the first-run setup and enters the diff screen; false means
+    // the user quit during setup. Either way finish() must run — Screen has no
+    // Drop — so always tear down, then surface the run/init result.
+    let result = match app.init() {
+        Ok(true) => app.run(refresh, cli.watch, Duration::from_millis(cli.poll_interval)),
+        Ok(false) => Ok(()),
+        Err(e) => Err(e),
+    };
     app.finish()?;
     result
 }
