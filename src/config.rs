@@ -166,6 +166,15 @@ impl Config {
         fill(&mut c.remove_emph, b.remove_emph);
     }
 
+    /// Switch to `theme` and re-derive the palette from it, discarding any
+    /// colors resolved from the previous theme. Used by the first-run picker,
+    /// where no user color overrides exist yet.
+    pub fn set_theme(&mut self, theme: &str) {
+        self.theme = theme.to_string();
+        self.colors = Colors::default();
+        self.resolve_theme_defaults();
+    }
+
     fn apply_gitconfig(&mut self) {
         let Ok(out) = Command::new("git")
             .args(["config", "--get-regexp", "^drift\\."])
@@ -287,6 +296,114 @@ fn find_config_file() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Built-in theme names offered by the first-run picker, generated at build
+/// time from the bundled `themes/*.toml` (see `build.rs`) with `ansi` first.
+/// Every name resolves in [`builtin_named`] (enforced by a unit test).
+include!(concat!(env!("OUT_DIR"), "/theme_names.rs"));
+
+/// Whether the first-run theme picker should be offered: true only when the user
+/// has no config at all — no config file in the standard locations and no
+/// `[drift]` keys in git config. Any existing setting means they've been here
+/// before, so drift stays out of the way.
+pub fn should_offer_setup() -> bool {
+    find_config_file().is_none() && !has_gitconfig_drift()
+}
+
+fn has_gitconfig_drift() -> bool {
+    Command::new("git")
+        .args(["config", "--get-regexp", "^drift\\."])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// The path the first-run picker writes to: `config.toml` in the first XDG
+/// config dir (`$XDG_CONFIG_HOME/drift` or `~/.config/drift`).
+fn config_write_path() -> Option<PathBuf> {
+    if let Ok(x) = std::env::var("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(x).join("drift").join("config.toml"));
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".config/drift/config.toml"))
+}
+
+/// The setup-target config path as a display string (for the picker), with the
+/// home directory collapsed to `~`. Falls back to the canonical location when
+/// no home dir is known.
+pub fn config_write_path_display() -> String {
+    let Some(path) = config_write_path() else {
+        return "~/.config/drift/config.toml".to_string();
+    };
+    if let Ok(home) = std::env::var("HOME") {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+/// The contents written to a fresh `config.toml` by the first-run picker: the
+/// chosen theme plus comments pointing at customization and custom themes.
+fn theme_config_body(theme: &str) -> String {
+    format!(
+        "# drift config — written by first-run setup.\n\
+         # Every built-in theme, plus custom ones, is documented at\n\
+         # https://github.com/aymanbagabas/drift (see the themes/ directory).\n\
+         # Drop your own TOML palette here to customize colors, or add a custom\n\
+         # theme and point `theme` at it.\n\
+         theme = {theme:?}\n"
+    )
+}
+
+/// Persist the picked theme to a fresh `config.toml`, creating the directory as
+/// needed. The file is commented so the user can find their way from here to
+/// the full set of knobs and custom themes. Returns the path written.
+pub fn save_theme(theme: &str) -> std::io::Result<PathBuf> {
+    let path = config_write_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no HOME or XDG_CONFIG_HOME")
+    })?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, theme_config_body(theme))?;
+    Ok(path)
+}
+
+/// fzf-style fuzzy filter: keep the candidates whose characters contain `query`
+/// as a case-insensitive subsequence, ranked by match tightness (a shorter span
+/// from first to last matched char ranks higher, ties broken by original order).
+/// An empty query keeps everything in order. Returns indices into `candidates`.
+pub fn fuzzy_filter(query: &str, candidates: &[&str]) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..candidates.len()).collect();
+    }
+    let mut scored: Vec<(usize, usize)> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| fuzzy_span(query, c).map(|span| (span, i)))
+        .collect();
+    // Tighter span first, then original order for stability.
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
+/// If `query` is a case-insensitive subsequence of `text`, the span (in chars)
+/// from the first to the last matched character; else None. Smaller is tighter.
+fn fuzzy_span(query: &str, text: &str) -> Option<usize> {
+    let q: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
+    let mut qi = 0;
+    let (mut first, mut last) = (None, 0usize);
+    for (ti, tc) in text.chars().flat_map(|c| c.to_lowercase()).enumerate() {
+        if qi < q.len() && tc == q[qi] {
+            first.get_or_insert(ti);
+            last = ti;
+            qi += 1;
+        }
+    }
+    (qi == q.len()).then(|| last - first.unwrap() + 1)
 }
 
 fn parse_file(path: &Path) -> Option<Config> {
@@ -708,6 +825,66 @@ pub fn parse_style(spec: &str, palette: &Palette) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_theme_writes_where_find_config_looks() {
+        // save_theme must land exactly where find_config_file (and thus
+        // should_offer_setup) looks, so a picked theme sticks on the next run.
+        let dir = std::env::temp_dir().join(format!("drift-cfg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let path = save_theme("nord").expect("write config");
+        assert!(path.exists());
+        assert_eq!(find_config_file().as_ref(), Some(&path));
+        assert_eq!(parse_file(&path).map(|c| c.theme), Some("nord".to_string()));
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_theme_config_round_trips() {
+        // The written config must parse back to the chosen theme, and set_theme
+        // must re-derive a highlighting palette for a non-ansi choice.
+        let body = theme_config_body("gruvbox-dark");
+        assert!(body.contains("customize"), "comment should mention customization");
+        let cfg: Config = toml::from_str(&body).unwrap();
+        assert_eq!(cfg.theme, "gruvbox-dark");
+
+        let mut c = Config::default();
+        c.set_theme("onedark");
+        assert_eq!(c.theme, "onedark");
+        assert!(c.syntax_enabled());
+        // Switching back to ansi disables highlighting again.
+        c.set_theme("ansi");
+        assert!(!c.syntax_enabled());
+    }
+
+    #[test]
+    fn theme_names_all_resolve_and_ansi_first() {
+        assert_eq!(THEME_NAMES[0], "ansi", "ansi must be the pre-selected first entry");
+        for name in THEME_NAMES {
+            assert!(builtin_named(name).is_some(), "{name} has no builtin palette");
+        }
+    }
+
+    #[test]
+    fn fuzzy_filter_ranks_and_filters() {
+        // Empty query keeps everything in order.
+        assert_eq!(fuzzy_filter("", THEME_NAMES).len(), THEME_NAMES.len());
+        // Subsequence match, case-insensitive.
+        let got: Vec<&str> = fuzzy_filter("drac", THEME_NAMES)
+            .iter()
+            .map(|&i| THEME_NAMES[i])
+            .collect();
+        assert_eq!(got, vec!["dracula"]);
+        // A non-subsequence is dropped.
+        assert!(fuzzy_filter("zzz", THEME_NAMES).is_empty());
+        // Tighter span ranks first, independent of the candidate order: "on"
+        // spans 2 in "on", 3 in "oxn", 4 in "oxxn".
+        let cands = ["oxxn", "oxn", "on"];
+        let ranked: Vec<&str> = fuzzy_filter("on", &cands).iter().map(|&i| cands[i]).collect();
+        assert_eq!(ranked, vec!["on", "oxn", "oxxn"]);
+    }
 
     #[test]
     fn colors_parse() {
