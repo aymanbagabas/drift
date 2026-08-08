@@ -110,6 +110,13 @@ Make it your default git diff pager:
 git config --global pager.diff drift
 ```
 
+drift defaults to the `ansi` theme — your terminal's own colors, with syntax
+highlighting off. Pick a theme to turn it on, globally via git config:
+
+```sh
+git config --global drift.theme onedark   # onelight, dracula, nord, gruvbox-dark, ...
+```
+
 Some flags worth knowing:
 
 | Flag | What it does |
@@ -171,9 +178,11 @@ drift is fully mouse-driven too:
 
 ## Themes
 
-Set `theme = "..."` in your config. Built in and ready:
+Set `theme = "..."` in your config, or `git config drift.theme ...`. The default
+is **`ansi`** — your terminal's own 16 colors, with syntax highlighting and
+word-diff emphasis left off. Any other built-in theme turns highlighting on:
 
-- `onedark`, `onelight` (the defaults, picked by your terminal background)
+- `onedark`, `onelight`
 - `dracula`
 - `gruvbox-dark`, `gruvbox-light`
 - `nord`
@@ -181,10 +190,9 @@ Set `theme = "..."` in your config. Built in and ready:
 - `catppuccin-mocha`, `catppuccin-latte`
 - `tokyonight`
 - `monokai`
-- `ansi`, which borrows your terminal's own 16 colors so drift matches
-  whatever palette you already run. It leaves code text and word-diff
-  emphasis alone, since 16 colors are too few to layer cleanly over diff
-  colors.
+- `ansi` — the default: borrows your terminal's own 16 colors so drift matches
+  whatever palette you already run. It leaves code text and word-diff emphasis
+  alone, since 16 colors are too few to layer cleanly over diff colors.
 
 Any [syntect](https://github.com/trishume/syntect) theme name works too (for
 example `base16-ocean.dark`), it just won't repaint the UI chrome to match.
