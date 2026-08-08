@@ -489,7 +489,7 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
             surface: "#073642",
             cursor: "#094e5e",
             add_line: "#153d2d",
-            remove_line: "#232c35",
+            remove_line: "#3d2229",
             header_line: "#0a3a4a",
             add_emph: "#2d5024",
             remove_emph: "#4b2d34",
