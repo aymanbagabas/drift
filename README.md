@@ -194,8 +194,14 @@ word-diff emphasis left off. Any other built-in theme turns highlighting on:
   whatever palette you already run. It leaves code text and word-diff emphasis
   alone, since 16 colors are too few to layer cleanly over diff colors.
 
-Any [syntect](https://github.com/trishume/syntect) theme name works too (for
-example `base16-ocean.dark`), it just won't repaint the UI chrome to match.
+A handful of [syntect](https://github.com/trishume/syntect) theme names also
+work, but only the seven that ship in syntect's default set — `InspiredGitHub`,
+`Solarized (dark)`, `Solarized (light)`, `base16-eighties.dark`,
+`base16-mocha.dark`, `base16-ocean.dark`, and `base16-ocean.light`. They color
+the code but won't repaint the UI chrome to match, and (Solarized aside) the
+built-ins above already cover them with matching chrome. Any other theme name —
+a custom `.tmTheme`, or a syntect theme not in that set — silently falls back to
+`onedark`.
 
 The `themes/` directory has a full, commented config for every built-in theme.
 Copy one and go:

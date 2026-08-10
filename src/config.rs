@@ -120,6 +120,8 @@ impl Default for Colors {
 impl Config {
     /// Load config: defaults, then a config file (explicit path or the first
     /// found in standard locations), then git config `[drift]` overrides.
+    /// Colors and styles keep their unset (empty) state — they're resolved
+    /// against the theme's built-in defaults lazily, in `Palette`/`Theme`.
     pub fn load(explicit: Option<&Path>) -> Self {
         let mut cfg = Config::default();
         if let Some(path) = explicit.map(PathBuf::from).or_else(find_config_file) {
@@ -128,42 +130,12 @@ impl Config {
             }
         }
         cfg.apply_gitconfig();
-        cfg.resolve_theme_defaults();
-        cfg
-    }
-
-    /// Fill any unset theme/color from a built-in palette. The default theme is
-    /// `ansi`, which follows the terminal's own colors; unknown theme names
-    /// (e.g. a syntect theme) also fall back to the `ansi` palette.
-    fn resolve_theme_defaults(&mut self) {
-        if self.theme.is_empty() {
-            self.theme = "ansi".into();
+        // The empty theme means "unset"; normalize it to the default (`ansi`)
+        // so theme-name checks (syntax_enabled, built-in lookup) are simple.
+        if cfg.theme.is_empty() {
+            cfg.theme = "ansi".into();
         }
-        let b = builtin_named(&self.theme)
-            .unwrap_or_else(|| builtin_named("ansi").expect("ansi palette exists"));
-        let c = &mut self.colors;
-        let fill = |s: &mut String, v: &str| {
-            if s.is_empty() {
-                *s = v.to_string();
-            }
-        };
-        fill(&mut c.add, b.green);
-        fill(&mut c.remove, b.red);
-        fill(&mut c.context, b.fg);
-        fill(&mut c.header, b.blue);
-        fill(&mut c.line_number, b.grey);
-        fill(&mut c.primary, b.purple);
-        fill(&mut c.secondary, b.blue);
-        fill(&mut c.foreground, b.fg);
-        fill(&mut c.background, b.bg);
-        fill(&mut c.muted, b.grey);
-        fill(&mut c.surface, b.surface);
-        fill(&mut c.cursor, b.cursor);
-        fill(&mut c.add_line, b.add_line);
-        fill(&mut c.remove_line, b.remove_line);
-        fill(&mut c.header_line, b.header_line);
-        fill(&mut c.add_emph, b.add_emph);
-        fill(&mut c.remove_emph, b.remove_emph);
+        cfg
     }
 
     fn apply_gitconfig(&mut self) {
@@ -593,7 +565,46 @@ pub fn builtin_named(name: &str) -> Option<Builtin> {
     }
 }
 
-/// Parse a color name, `#rrggbb` hex, or 0-255 palette index into a
+/// Default component styles, the built-in counterpart to [`builtin_named`]'s
+/// colors. Each spec is `fg bg attrs...` resolved against the theme's palette,
+/// so the specs are shared across themes and adapt through the palette — a
+/// theme only appears here when it needs a genuinely different treatment.
+///
+/// `ansi` rides the terminal's own colors, and its `muted` (brightblack) is too
+/// dim for the help-grid descriptions, so it uses the plain terminal foreground
+/// there instead.
+pub fn builtin_style(theme: &str, component: &str) -> &'static str {
+    if theme == "ansi" && component == "help-desc" {
+        return "default";
+    }
+    match component {
+        "add" => "add",
+        "remove" => "remove",
+        "context" => "context",
+        "header" => "header bold",
+        "line-number" => "line-number",
+        "statusbar" => "foreground surface",
+        "statusbar-logo" => "background primary bold",
+        "statusbar-filename" => "foreground surface bold",
+        "statusbar-add" => "add surface",
+        "statusbar-remove" => "remove surface",
+        "statusbar-flags" => "muted surface",
+        "statusbar-stats" => "foreground surface",
+        "statusbar-search" => "secondary surface",
+        "statusbar-watch" => "background add bold",
+        "statusbar-help" => "background secondary bold",
+        "help-key" => "muted bold",
+        "help-desc" => "muted faint",
+        "dialog" => "foreground background",
+        "dialog-border" => "surface",
+        "sidebar-border" => "surface",
+        "search-match" => "background secondary bold",
+        "search-current" => "background primary bold",
+        _ => "",
+    }
+}
+
+
 /// uncurses [`Color`]. Returns None for "default"/"none"/unrecognized.
 pub fn parse_color(s: &str) -> Option<Color> {
     let s = s.trim();
@@ -640,25 +651,34 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn new(c: &Colors) -> Self {
+    /// Build the palette for `theme`: each token is the user's color when set,
+    /// otherwise the theme's built-in default (falling back to the `ansi`
+    /// palette for unknown/syntect theme names, which don't repaint the chrome).
+    pub fn new(c: &Colors, theme: &str) -> Self {
+        let b = builtin_named(theme)
+            .unwrap_or_else(|| builtin_named("ansi").expect("ansi palette exists"));
+        // User value if set, else the theme's built-in default.
+        let pick = |user: &str, default: &str| {
+            parse_color(if user.is_empty() { default } else { user })
+        };
         let map = HashMap::from([
-            ("add", parse_color(&c.add)),
-            ("remove", parse_color(&c.remove)),
-            ("context", parse_color(&c.context)),
-            ("header", parse_color(&c.header)),
-            ("line-number", parse_color(&c.line_number)),
-            ("primary", parse_color(&c.primary)),
-            ("secondary", parse_color(&c.secondary)),
-            ("foreground", parse_color(&c.foreground)),
-            ("background", parse_color(&c.background)),
-            ("muted", parse_color(&c.muted)),
-            ("surface", parse_color(&c.surface)),
-            ("cursor", parse_color(&c.cursor)),
-            ("add-line", parse_color(&c.add_line)),
-            ("remove-line", parse_color(&c.remove_line)),
-            ("header-line", parse_color(&c.header_line)),
-            ("add-emph", parse_color(&c.add_emph)),
-            ("remove-emph", parse_color(&c.remove_emph)),
+            ("add", pick(&c.add, b.green)),
+            ("remove", pick(&c.remove, b.red)),
+            ("context", pick(&c.context, b.fg)),
+            ("header", pick(&c.header, b.blue)),
+            ("line-number", pick(&c.line_number, b.grey)),
+            ("primary", pick(&c.primary, b.purple)),
+            ("secondary", pick(&c.secondary, b.blue)),
+            ("foreground", pick(&c.foreground, b.fg)),
+            ("background", pick(&c.background, b.bg)),
+            ("muted", pick(&c.muted, b.grey)),
+            ("surface", pick(&c.surface, b.surface)),
+            ("cursor", pick(&c.cursor, b.cursor)),
+            ("add-line", pick(&c.add_line, b.add_line)),
+            ("remove-line", pick(&c.remove_line, b.remove_line)),
+            ("header-line", pick(&c.header_line, b.header_line)),
+            ("add-emph", pick(&c.add_emph, b.add_emph)),
+            ("remove-emph", pick(&c.remove_emph, b.remove_emph)),
         ]);
         Palette { map }
     }
@@ -728,6 +748,26 @@ mod tests {
     }
 
     #[test]
+    fn builtin_style_is_theme_aware() {
+        // Shared default for all themes...
+        assert_eq!(builtin_style("onedark", "help-desc"), "muted faint");
+        assert_eq!(builtin_style("dracula", "help-desc"), "muted faint");
+        // ...except ansi, whose muted is too dim for help text.
+        assert_eq!(builtin_style("ansi", "help-desc"), "default");
+        // Non-help styles are shared even under ansi.
+        assert_eq!(builtin_style("ansi", "help-key"), "muted bold");
+    }
+
+    #[test]
+    fn palette_falls_back_to_theme_defaults() {
+        // Unset color → the theme's built-in value; set color → the user's.
+        let cols = Colors { add: "#123456".into(), ..Colors::default() };
+        let pal = Palette::new(&cols, "onedark");
+        assert!(matches!(pal.color("add"), Some(Color::Rgb(0x12, 0x34, 0x56))));
+        assert_eq!(pal.color("remove"), parse_color("#e06c75")); // onedark red
+    }
+
+    #[test]
     fn style_spec_parses() {
         let cols = Colors {
             foreground: "white".into(),
@@ -735,7 +775,7 @@ mod tests {
             primary: "cyan".into(),
             ..Colors::default()
         };
-        let pal = Palette::new(&cols);
+        let pal = Palette::new(&cols, "onedark");
         let s = parse_style("foreground surface bold", &pal);
         assert_eq!(s.fg, Some(Color::White));
         assert_eq!(s.bg, Some(Color::BrightBlack));
