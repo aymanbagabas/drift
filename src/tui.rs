@@ -76,17 +76,23 @@ struct Theme {
 
 impl Theme {
     fn from_config(c: &Config) -> Self {
-        let pal = Palette::new(&c.colors);
-        let sty = |name: &str, default: &str| {
-            let spec = c.styles.get(name).map(|s| s.as_str()).unwrap_or(default);
+        let pal = Palette::new(&c.colors, &c.theme);
+        // Each component style is the user's override when set, else the theme's
+        // built-in default — symmetric with how the palette resolves colors.
+        let sty = |name: &str| {
+            let spec = c
+                .styles
+                .get(name)
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| crate::config::builtin_style(&c.theme, name));
             parse_style(spec, &pal)
         };
         Theme {
-            add: sty("add", "add"),
-            remove: sty("remove", "remove"),
-            context: sty("context", "context"),
-            header: sty("header", "header bold"),
-            line_number: sty("line-number", "line-number"),
+            add: sty("add"),
+            remove: sty("remove"),
+            context: sty("context"),
+            header: sty("header"),
+            line_number: sty("line-number"),
             add_emph_bg: pal.color("add-emph"),
             remove_emph_bg: pal.color("remove-emph"),
             add_line_bg: pal.color("add-line"),
@@ -94,23 +100,23 @@ impl Theme {
             header_bg: pal.color("header-line"),
             cursor_bg: pal.color("cursor").unwrap_or(Color::Indexed(237)),
             background: pal.color("background"),
-            statusbar: sty("statusbar", "foreground surface"),
-            statusbar_logo: sty("statusbar-logo", "background primary bold"),
-            statusbar_filename: sty("statusbar-filename", "foreground surface bold"),
-            statusbar_add: sty("statusbar-add", "add surface"),
-            statusbar_remove: sty("statusbar-remove", "remove surface"),
-            statusbar_flags: sty("statusbar-flags", "muted surface"),
-            statusbar_stats: sty("statusbar-stats", "foreground surface"),
-            statusbar_search: sty("statusbar-search", "secondary surface"),
-            statusbar_watch: sty("statusbar-watch", "background add bold"),
-            statusbar_help: sty("statusbar-help", "background secondary bold"),
-            help_key: sty("help-key", "muted bold"),
-            help_desc: sty("help-desc", "muted faint"),
-            dialog: sty("dialog", "foreground background"),
-            dialog_border: sty("dialog-border", "surface"),
-            sidebar_border: sty("sidebar-border", "surface"),
-            search_match: sty("search-match", "background secondary bold"),
-            search_current: sty("search-current", "background primary bold"),
+            statusbar: sty("statusbar"),
+            statusbar_logo: sty("statusbar-logo"),
+            statusbar_filename: sty("statusbar-filename"),
+            statusbar_add: sty("statusbar-add"),
+            statusbar_remove: sty("statusbar-remove"),
+            statusbar_flags: sty("statusbar-flags"),
+            statusbar_stats: sty("statusbar-stats"),
+            statusbar_search: sty("statusbar-search"),
+            statusbar_watch: sty("statusbar-watch"),
+            statusbar_help: sty("statusbar-help"),
+            help_key: sty("help-key"),
+            help_desc: sty("help-desc"),
+            dialog: sty("dialog"),
+            dialog_border: sty("dialog-border"),
+            sidebar_border: sty("sidebar-border"),
+            search_match: sty("search-match"),
+            search_current: sty("search-current"),
             mascot_body: pal.color("primary").unwrap_or(Color::Indexed(99)),
             mascot_accent: pal.color("secondary").unwrap_or(Color::Indexed(75)),
         }
