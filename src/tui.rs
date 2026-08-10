@@ -3045,6 +3045,18 @@ impl App {
         }
     }
 
+    /// The whole-line background wash for a row of `kind`: the added/removed
+    /// tint or the header band, or `None` for plain context. The cursor
+    /// highlight is layered on top of this by the callers.
+    fn row_wash(&self, kind: RowKind) -> Option<Color> {
+        match kind {
+            RowKind::Add => self.theme.add_line_bg,
+            RowKind::Remove => self.theme.remove_line_bg,
+            RowKind::Hunk | RowKind::File => self.theme.header_bg,
+            RowKind::Context | RowKind::Note => None,
+        }
+    }
+
     fn render_diff(&mut self, x: u16, width: u16, body_h: u16) {
         // The sticky band pins the enclosing file/hunk headers to the top; the
         // scrolled content follows below it.
@@ -3063,17 +3075,11 @@ impl App {
             };
             let y = row;
             let is_cursor = idx == self.cursor && self.view == View::Diff;
-            // Whole-line background: the cursor wins, otherwise added/removed
-            // lines get a subtle wash (GitHub-style).
+            // Whole-line background: the cursor wins, otherwise the kind's wash.
             let row_bg = if is_cursor {
                 Some(self.theme.cursor_bg)
             } else {
-                match r.kind {
-                    RowKind::Add => self.theme.add_line_bg,
-                    RowKind::Remove => self.theme.remove_line_bg,
-                    RowKind::Hunk | RowKind::File => self.theme.header_bg,
-                    _ => None,
-                }
+                self.row_wash(r.kind)
             };
             self.draw_diff_row(r, x, width, y, row_bg, Gut::Both);
         }
@@ -3105,39 +3111,25 @@ impl App {
             };
             let y = row;
             let is_cursor = idx == self.cursor && self.view == View::Diff;
-            let cbg = if is_cursor {
-                Some(self.theme.cursor_bg)
-            } else {
-                None
-            };
+            // Cursor highlight (whole row), and the row's own wash under it.
+            let cbg = is_cursor.then_some(self.theme.cursor_bg);
+            let bg = cbg.or(self.row_wash(r.kind));
             match r.kind {
-                RowKind::File => {
-                    let hbg = cbg.or(self.theme.header_bg);
-                    self.draw_diff_row(r, x, width, y, hbg, Gut::Both);
-                    continue;
-                }
-                RowKind::Hunk => {
-                    let hbg = cbg.or(self.theme.header_bg);
-                    self.draw_diff_row(r, x, width, y, hbg, Gut::Both);
-                    continue;
-                }
-                RowKind::Note => {
-                    self.draw_diff_row(r, x, width, y, cbg, Gut::Both);
+                RowKind::File | RowKind::Hunk | RowKind::Note => {
+                    self.draw_diff_row(r, x, width, y, bg, Gut::Both);
                     continue;
                 }
                 RowKind::Context => {
-                    self.draw_diff_row(r, x, left_w, y, cbg, Gut::Old);
-                    self.draw_diff_row(r, right_x, right_w, y, cbg, Gut::New);
+                    self.draw_diff_row(r, x, left_w, y, bg, Gut::Old);
+                    self.draw_diff_row(r, right_x, right_w, y, bg, Gut::New);
                 }
                 RowKind::Remove => {
-                    let lbg = cbg.or(self.theme.remove_line_bg);
-                    self.draw_diff_row(r, x, left_w, y, lbg, Gut::Old);
+                    self.draw_diff_row(r, x, left_w, y, bg, Gut::Old);
                     self.fill_slash(right_x, right_w, y, cbg);
                 }
                 RowKind::Add => {
                     self.fill_slash(x, left_w, y, cbg);
-                    let rbg = cbg.or(self.theme.add_line_bg);
-                    self.draw_diff_row(r, right_x, right_w, y, rbg, Gut::New);
+                    self.draw_diff_row(r, right_x, right_w, y, bg, Gut::New);
                 }
             }
             let mut dv = self.theme.sidebar_border.clone();
