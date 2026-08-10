@@ -1090,6 +1090,15 @@ impl App {
             return;
         }
         let text = self.source.diff(&self.effective_opts()).unwrap_or_default();
+        // Skip when the diff is byte-for-byte what's already shown (or building):
+        // git fires watcher events for internal writes that don't change the
+        // diff — even `git diff` itself can touch `.git/index`. Rebuilding on
+        // each would drop the in-flight prefetch/rebuild and restart it, so a
+        // burst starves the document build and leaves the body blank while the
+        // file list still shows. The poll path guards the same way.
+        if text == self.last_diff {
+            return;
+        }
         self.rebuild_from(text);
     }
 
