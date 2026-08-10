@@ -1090,7 +1090,24 @@ impl App {
             return;
         }
         let text = self.source.diff(&self.effective_opts()).unwrap_or_default();
-        self.rebuild_from(text);
+        // Rebuild only when the diff actually changed: git fires watcher events
+        // for internal writes that don't touch the diff (even `git diff` itself
+        // writes `.git/index`). Rebuilding on each would drop the in-flight
+        // prefetch/rebuild and restart it, so a burst starves the document
+        // build and leaves the body blank while the file list still shows.
+        if Self::diff_is_new(&text, &self.last_diff) {
+            self.rebuild_from(text);
+        }
+    }
+
+    /// Whether freshly fetched diff `text` warrants a rebuild: only when it
+    /// differs from what's already shown or building (`last`, kept in sync by
+    /// `rebuild_from`). Both the git-watcher `reload` and the worktree poll gate
+    /// on this so no-op events don't churn the in-flight build. The comparison
+    /// must stay *before* `rebuild_from`, which overwrites `last`; the
+    /// `diff_is_new_only_on_change` test pins that behaviour.
+    fn diff_is_new(text: &str, last: &str) -> bool {
+        text != last
     }
 
     /// Kick off an async rebuild from already-fetched diff text. Shared by
@@ -1857,7 +1874,7 @@ impl App {
         };
         match rx.try_recv() {
             Ok(text) => {
-                if text != self.last_diff {
+                if Self::diff_is_new(&text, &self.last_diff) {
                     self.rebuild_from(text);
                 }
             }
@@ -3778,6 +3795,19 @@ mod tests {
         // Unified view (None) selects every row kind.
         assert!(App::row_in_pane(RowKind::Add, None));
         assert!(App::row_in_pane(RowKind::Remove, None));
+    }
+
+    #[test]
+    fn diff_is_new_only_on_change() {
+        use super::App;
+        // Identical text is a no-op event: no rebuild, so the in-flight
+        // prefetch/rebuild worker is left running (blank-body fix).
+        assert!(!App::diff_is_new("diff --git a/x b/x\n@@ -1 +1 @@\n", "diff --git a/x b/x\n@@ -1 +1 @@\n"));
+        assert!(!App::diff_is_new("", ""));
+        // Any real change rebuilds, superseding the current worker.
+        assert!(App::diff_is_new("new", "old"));
+        assert!(App::diff_is_new("x", ""));
+        assert!(App::diff_is_new("", "x"));
     }
 
     #[test]
