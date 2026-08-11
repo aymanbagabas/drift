@@ -33,3 +33,31 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# `cargo binstall` reuses the GoReleaser release archives. Their names mirror
+# the GoReleaser `archives.name_template` (drift_<version>_<os>_<arch>.<ext>),
+# which uses Go-style os/arch rather than Rust target triples, so each target is
+# mapped explicitly. Targets with no entry (musl, 32-bit, ...) have no published
+# binary and fall back to building from source.
+[package.metadata.binstall]
+bin-dir = "{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_darwin_amd64.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_darwin_arm64.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_linux_amd64.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_linux_arm64.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_windows_amd64.zip"
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_windows_amd64.zip"
+pkg-fmt = "zip"

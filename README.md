@@ -51,6 +51,12 @@ scoop install drift
 cargo install drift-diff
 ```
 
+Or grab the prebuilt binary from the GitHub release instead of compiling:
+
+```sh
+cargo binstall drift-diff
+```
+
 ### npm
 
 ```sh
