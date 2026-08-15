@@ -1,8 +1,8 @@
 # GoReleaser config for drift. Builds Rust binaries with cargo-zigbuild and
 # publishes archives, checksums, Linux packages, a Homebrew formula, a Scoop
 # manifest, and a Nix package (to the aymanbagabas/nur repo). Requires zig +
-# cargo-zigbuild (installed in CI) and a TAP_GITHUB_TOKEN secret with write
-# access to the tap, bucket, and nur repos.
+# cargo-zigbuild and nix-hash (the Nix pipe shells out to it) in CI, plus a
+# TAP_GITHUB_TOKEN secret with write access to the tap, bucket, and nur repos.
 version: 2
 
 project_name: drift
