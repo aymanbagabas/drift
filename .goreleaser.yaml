@@ -1,7 +1,8 @@
 # GoReleaser config for drift. Builds Rust binaries with cargo-zigbuild and
-# publishes archives, checksums, Linux packages, a Homebrew formula, and a
-# Scoop manifest. Requires zig + cargo-zigbuild (installed in CI) and a
-# TAP_GITHUB_TOKEN secret with write access to the tap and bucket repos.
+# publishes archives, checksums, Linux packages, a Homebrew formula, a Scoop
+# manifest, and a Nix package (to the aymanbagabas/nur repo). Requires zig +
+# cargo-zigbuild and nix-hash (the Nix pipe shells out to it) in CI, plus a
+# TAP_GITHUB_TOKEN secret with write access to the tap, bucket, and nur repos.
 version: 2
 
 project_name: drift
@@ -128,6 +129,27 @@ scoops:
     homepage: https://github.com/aymanbagabas/drift
     description: A standalone git diff pager for the terminal.
     license: MIT
+    commit_author:
+      name: Ayman Bagabas
+      email: ayman.bagabas@gmail.com
+
+nix:
+  - name: drift
+    ids:
+      - drift
+    repository:
+      owner: aymanbagabas
+      name: nur
+      branch: master
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/aymanbagabas/drift
+    description: A standalone git diff pager for the terminal.
+    license: mit
+    # `nix run` and the wrapper target this binary; `git` is a runtime dep since
+    # drift shells out to it, so makeWrapper puts it on PATH.
+    main_program: drift
+    dependencies:
+      - git
     commit_author:
       name: Ayman Bagabas
       email: ayman.bagabas@gmail.com

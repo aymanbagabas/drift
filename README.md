@@ -87,6 +87,15 @@ sudo yum install drift
 yay -S drift-diff-bin
 ```
 
+### Nix (NUR)
+
+From the [Nix User Repositories](https://github.com/nix-community/NUR), install
+`nur.repos.aymanbagabas.drift`. Or run it ad-hoc without configuring NUR:
+
+```sh
+nix-shell -p '(import (fetchTarball "https://github.com/aymanbagabas/nur/archive/master.tar.gz") {}).drift'
+```
+
 ### Prebuilt binaries
 
 Grab an archive for your platform from the

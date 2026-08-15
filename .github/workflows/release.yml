@@ -25,6 +25,12 @@ jobs:
       # installed by GoReleaser's before-hook.
       - uses: mlugg/setup-zig@v2
 
+      # GoReleaser's `nix` publisher shells out to `nix-hash` to compute the
+      # nix-base32 archive hashes; without it on PATH the whole Nix pipe is
+      # silently skipped and no package reaches the NUR. Install Nix so the
+      # publisher runs.
+      - uses: cachix/install-nix-action@v31
+
       # `fury` CLI pushes the deb/rpm/apk to Gemfury (repo.aymanbagabas.com).
       # https://gemfury.com/guide/cli/install/
       - name: Install Gemfury CLI
