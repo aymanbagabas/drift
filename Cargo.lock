@@ -205,7 +205,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "drift-diff"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "clap",
  "notify",
@@ -755,9 +755,9 @@ dependencies = [
 
 [[package]]
 name = "uncurses"
-version = "0.0.2"
+version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c84ab09dc5b2bed48eb0357a7e4704e9d4ae2743babecbd3a0b5ad604349a7b"
+checksum = "c470d70d4b7ad3037825c73ba1c616e978484be679c6b94cd834541e4628c74a"
 dependencies = [
  "bitflags",
  "compact_str",

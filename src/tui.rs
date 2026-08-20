@@ -13,7 +13,7 @@ use uncurses::buffer::{Bounded, Line, SurfaceMut};
 use uncurses::cell::Cell;
 use uncurses::color::Color;
 use uncurses::event::{Event, Key, KeyModifiers, MouseButton};
-use uncurses::screen::{MouseTracking, Screen, ScreenOptions};
+use uncurses::program::{MouseTracking, Program, ProgramOptions};
 use uncurses::style::{AttrFlags, Style};
 use uncurses::terminal::{TtyInput, TtyOutput};
 use uncurses::text::{grapheme_cells, TextSurface, WidthMode};
@@ -689,7 +689,7 @@ fn slice_cells(cells: &[Cell], start: usize, end: usize) -> String {
 }
 
 pub struct App {
-    screen: Screen<TtyInput, TtyOutput>,
+    program: Program<TtyInput, TtyOutput>,
     config: Config,
     theme: Theme,
     highlighter: Arc<Highlighter>,
@@ -834,24 +834,24 @@ impl App {
         let theme = Theme::from_config(&config);
         // Read input/output from the controlling terminal (/dev/tty) so the
         // TUI works even when a diff is piped in on stdin (pager mode).
-        let mut screen = Screen::open()?;
-        screen.init_with(ScreenOptions {
+        let mut program = Program::open()?;
+        program.init_with(ProgramOptions {
             mouse: Some(MouseTracking::empty()),
-            ..ScreenOptions::default()
+            ..ProgramOptions::default()
         })?;
-        screen.enter_alt_screen()?;
-        screen.hide_cursor()?;
+        program.enter_alt_screen()?;
+        program.hide_cursor()?;
         // Paint the whole terminal in the theme's background so unwritten gaps
         // match the diff body. Skipped when the theme rides the terminal's own
         // background (e.g. the `ansi` theme). uncurses resets this on finish().
         if let Some(c) = theme.background {
-            screen.set_background_color(c)?;
+            program.set_background_color(c)?;
         }
         // Enable mouse now rather than waiting for the capability-query reply,
         // so clicks and wheel work immediately (and in non-interactive tests).
-        screen.enable_mouse(MouseTracking::empty())?;
+        program.enable_mouse(MouseTracking::empty())?;
         let mut app = App {
-            screen,
+            program,
             config,
             theme,
             highlighter,
@@ -1162,7 +1162,7 @@ impl App {
                 self.refresh_search();
                 // A wholesale document swap can move content past rows that were
                 // blank before; force a full repaint so nothing stale lingers.
-                self.screen.invalidate();
+                self.program.screen_mut().invalidate();
             }
             Err(TryRecvError::Empty) => self.rebuild_worker = Some(rx), // still building
             Err(TryRecvError::Disconnected) => {} // superseded/errored: drop rx
@@ -1246,7 +1246,7 @@ impl App {
     /// Physical rows of the body region (everything above the footer/help
     /// chrome), including the sticky-header band.
     fn body_h_screen(&self) -> usize {
-        (self.screen.height() as usize).saturating_sub(self.chrome_h())
+        (self.program.screen().height() as usize).saturating_sub(self.chrome_h())
     }
 
     /// Document rows pinned at the top of the body for the current scroll: the
@@ -1339,7 +1339,7 @@ impl App {
         let key_w = entries.iter().map(|(k, _)| self.width(k) as usize).max().unwrap_or(0);
         let desc_w = entries.iter().map(|(_, v)| self.width(v) as usize).max().unwrap_or(0);
         let cell_w = key_w + 2 + desc_w + 3; // +2 key/desc gap, +3 column gap
-        let w = self.screen.width() as usize;
+        let w = self.program.screen().width() as usize;
         let cols = ((w.saturating_sub(1)) / cell_w).clamp(1, entries.len());
         let rows = entries.len().div_ceil(cols);
         (cols, rows, cell_w)
@@ -1378,7 +1378,7 @@ impl App {
     /// use the smaller pane's content width — that's what a line must scroll
     /// within, and it lets the widest line reveal fully in either pane.
     fn content_view_w(&self) -> u16 {
-        let body = self.screen.width().saturating_sub(self.sidebar_w());
+        let body = self.program.screen().width().saturating_sub(self.sidebar_w());
         if self.split {
             let left = self.split_left_w(body);
             let right = body.saturating_sub(left + 1);
@@ -1436,7 +1436,7 @@ impl App {
         self.sidebar.unwrap_or_else(|| match self.config.sidebar.as_str() {
             "always" | "on" | "open" => true,
             "never" | "off" | "closed" => false,
-            _ => self.screen.width() >= 150,
+            _ => self.program.screen().width() >= 150,
         })
     }
 
@@ -1446,7 +1446,7 @@ impl App {
         if !self.sidebar_visible() {
             return 0;
         }
-        let max = (self.screen.width() / 2).max(2);
+        let max = (self.program.screen().width() / 2).max(2);
         let want = self.sidebar_width.unwrap_or(self.config.sidebar_width);
         (want as u16).clamp(8, max)
     }
@@ -1457,13 +1457,13 @@ impl App {
         if self.sidebar_left() {
             sw.saturating_sub(1)
         } else {
-            self.screen.width().saturating_sub(sw)
+            self.program.screen().width().saturating_sub(sw)
         }
     }
 
     /// Resize the sidebar so its divider follows screen column `x`.
     fn resize_sidebar_to(&mut self, x: u16) {
-        let w = self.screen.width();
+        let w = self.program.screen_mut().width();
         let width = if self.sidebar_left() {
             x + 1
         } else {
@@ -1482,7 +1482,7 @@ impl App {
 
     /// Screen column of the split divider, for click-to-drag hit testing.
     fn split_div_x(&self) -> u16 {
-        let bw = self.screen.width().saturating_sub(self.sidebar_w());
+        let bw = self.program.screen().width().saturating_sub(self.sidebar_w());
         self.body_x() + self.split_left_w(bw)
     }
 
@@ -1490,7 +1490,8 @@ impl App {
     fn resize_split_to(&mut self, x: u16) {
         let bx = self.body_x();
         let inner = self
-            .screen
+            .program
+            .screen()
             .width()
             .saturating_sub(self.sidebar_w())
             .saturating_sub(1);
@@ -1524,7 +1525,7 @@ impl App {
         if self.sidebar_left() {
             x < sw
         } else {
-            x >= self.screen.width().saturating_sub(sw)
+            x >= self.program.screen().width().saturating_sub(sw)
         }
     }
 
@@ -1585,7 +1586,7 @@ impl App {
             }
             Some(Pane::Left) => (bx, self.content_start(kind, Gut::Old)),
             Some(Pane::Right) => {
-                let bw = self.screen.width().saturating_sub(self.sidebar_w());
+                let bw = self.program.screen().width().saturating_sub(self.sidebar_w());
                 (bx + self.split_left_w(bw) + 1, self.content_start(kind, Gut::New))
             }
         }
@@ -1756,7 +1757,7 @@ impl App {
         };
         let args: Vec<String> = parts.map(String::from).collect();
 
-        self.screen.pause()?;
+        self.program.pause()?;
         // ponytail: `+LINE file` covers vi/nano/emacs/less; a picker for
         // editor-specific syntax (code --goto) can come if anyone asks.
         let _ = std::process::Command::new(bin)
@@ -1764,7 +1765,7 @@ impl App {
             .arg(format!("+{line}"))
             .arg(&path)
             .status();
-        self.screen.resume()?;
+        self.program.resume()?;
         Ok(())
     }
 
@@ -1824,10 +1825,10 @@ impl App {
             if self.files.is_empty() || self.mascot_pinned {
                 timeout = timeout.min(Duration::from_millis(80));
             }
-            if self.screen.poll_event(Some(timeout))? {
+            if self.program.poll_event(Some(timeout))? {
                 // Drain every queued event before the next render so bursts
                 // (held keys, fast scrolling, paste) stay responsive.
-                while let Some(ev) = self.screen.try_read_event() {
+                while let Some(ev) = self.program.try_read_event()? {
                     if self.handle(ev)? {
                         return Ok(());
                     }
@@ -1893,8 +1894,8 @@ impl App {
                 // Unix-only: Windows has no SIGTSTP / job control.
                 #[cfg(unix)]
                 if k.matches("ctrl+z") {
-                    self.screen.suspend()?;
-                    self.screen.resume()?;
+                    self.program.suspend()?;
+                    self.program.resume()?;
                     return Ok(false);
                 }
                 // Search prompt captures the keyboard while typing: printable
@@ -2243,7 +2244,7 @@ impl App {
                     // grab offset, and let it lean its antennas as it moves.
                     let bx = self.body_x();
                     let body_h = self.body_h_screen() as u16;
-                    let bw = self.screen.width().saturating_sub(self.sidebar_w());
+                    let bw = self.program.screen_mut().width().saturating_sub(self.sidebar_w());
                     let tx = m.x.saturating_sub(bx).saturating_sub(gx) as f32;
                     let ty = m.y.saturating_sub(gy) as f32;
                     if let Some(mascot) = self.mascot.as_mut() {
@@ -2294,7 +2295,7 @@ impl App {
             }
             Event::Resize(ws) => {
                 self.clear_sel();
-                self.screen.resize((ws.col, ws.row));
+                self.program.screen_mut().resize((ws.col, ws.row));
                 self.move_cursor(0);
                 self.scroll_h(0);
             }
@@ -2352,7 +2353,7 @@ impl App {
             return Ok(());
         }
         let lines = text.matches('\n').count() + 1;
-        self.screen.set_system_clipboard(text.as_bytes())?;
+        self.program.set_system_clipboard(text.as_bytes())?;
         self.set_flash(format!(
             "copied {} line{}",
             lines,
@@ -2375,7 +2376,7 @@ impl App {
         if patch.is_empty() {
             return Ok(());
         }
-        self.screen.set_system_clipboard(patch.as_bytes())?;
+        self.program.set_system_clipboard(patch.as_bytes())?;
         self.set_flash("copied file diff");
         Ok(())
     }
@@ -2436,7 +2437,7 @@ impl App {
         if self.rows().is_empty() {
             return;
         }
-        let w = self.screen.width();
+        let w = self.program.screen_mut().width();
         let sw = self.sidebar_w();
         // Clamp highlights to the diff body so they never spill into a sidebar
         // (right edge is the terminal width minus the sidebar); in split view a
@@ -2490,7 +2491,7 @@ impl App {
         }
         for (y, sx, ex) in segs {
             for x in sx..ex {
-                if let Some(c) = self.screen.cell_mut((x, y)) {
+                if let Some(c) = self.program.screen_mut().cell_mut((x, y)) {
                     c.style = c.style.clone().reverse();
                 }
             }
@@ -2505,7 +2506,7 @@ impl App {
         if self.query.is_empty() || self.matches.is_empty() || self.rows().is_empty() {
             return;
         }
-        let w = self.screen.width();
+        let w = self.program.screen_mut().width();
         let sw = self.sidebar_w();
         let body_right = if self.sidebar_left() { w } else { w - sw };
         let body_h = self.viewport_rows();
@@ -2562,7 +2563,7 @@ impl App {
         for (y, sx, ex, cur) in segs {
             let st = if cur { &cstyle } else { &mstyle };
             for x in sx..ex {
-                if let Some(c) = self.screen.cell_mut((x, y)) {
+                if let Some(c) = self.program.screen_mut().cell_mut((x, y)) {
                     c.style = st.clone();
                 }
             }
@@ -2575,7 +2576,7 @@ impl App {
             None => "drift".to_string(),
         };
         if want != self.title {
-            self.screen.set_title(&want)?;
+            self.program.set_title(&want)?;
             self.title = want;
         }
         Ok(())
@@ -2583,12 +2584,12 @@ impl App {
 
     fn render(&mut self) -> io::Result<()> {
         self.update_title()?;
-        self.screen.clear();
-        let w = self.screen.width();
-        let h = self.screen.height();
+        self.program.screen_mut().clear();
+        let w = self.program.screen_mut().width();
+        let h = self.program.screen_mut().height();
         if w < 20 || h < 4 {
-            self.screen.set_str((0, 0), "terminal too small", Style::default());
-            return self.screen.render();
+            self.program.screen_mut().set_str((0, 0), "terminal too small", Style::default());
+            return self.program.screen_mut().render();
         }
 
         let chrome = self.chrome_h() as u16;
@@ -2640,14 +2641,14 @@ impl App {
         if empty || self.mascot_pinned {
             self.render_empty(bx, bw, body_h);
         }
-        self.screen.render()
+        self.program.screen_mut().render()
     }
 
     /// The single bottom footer: a bold "drift" badge, the current file name,
     /// its stats and flags on a subtle chip, then right-aligned global stats, a
     /// watch indicator, and a "? help" badge.
     fn render_footer(&mut self, row: u16) {
-        let w = self.screen.width();
+        let w = self.program.screen_mut().width();
         let (nf, add, del) = diff::totals(&self.files);
         let file = self.files.get(self.selected);
         let name = file.map(|f| f.path()).unwrap_or("(no changes)").to_string();
@@ -2659,7 +2660,7 @@ impl App {
         let bar = self.theme.statusbar.clone();
 
         // Base fill for the whole bar.
-        self.screen
+        self.program.screen_mut()
             .set_str((0, row), &" ".repeat(w as usize), bar.clone());
 
         // Right edge, laid out right-to-left: "? help" badge, the watch badge
@@ -2667,13 +2668,13 @@ impl App {
         let help_badge = " ? help ";
         let help_x = w.saturating_sub(self.width(help_badge));
         self.help_badge_x = help_x;
-        self.screen
+        self.program.screen_mut()
             .set_str((help_x, row), help_badge, self.theme.statusbar_help.clone());
 
         let w_x = if self.watch {
             let w_badge = " W ";
             let wx = help_x.saturating_sub(self.width(w_badge));
-            self.screen
+            self.program.screen_mut()
                 .set_str((wx, row), w_badge, self.theme.statusbar_watch.clone());
             wx
         } else {
@@ -2684,7 +2685,7 @@ impl App {
         let a_x = if self.opts.all && self.source.reads_worktree() {
             let a_badge = " A ";
             let ax = w_x.saturating_sub(self.width(a_badge));
-            self.screen
+            self.program.screen_mut()
                 .set_str((ax, row), a_badge, self.theme.statusbar_watch.clone());
             ax
         } else {
@@ -2694,7 +2695,7 @@ impl App {
         // Global stats.
         let stats = format!(" {nf} files +{add} -{del} ");
         let stats_x = a_x.saturating_sub(self.width(&stats));
-        self.screen
+        self.program.screen_mut()
             .set_str((stats_x, row), &stats, self.theme.statusbar_stats.clone());
 
         // Loading indicator while the stdin streamer is still delivering files.
@@ -2702,7 +2703,7 @@ impl App {
         let load_x = if self.loading {
             let badge = " ⋯ loading ";
             let lx = stats_x.saturating_sub(self.width(badge));
-            self.screen
+            self.program.screen_mut()
                 .set_str((lx, row), badge, self.theme.statusbar_flags.clone());
             lx
         } else {
@@ -2711,14 +2712,14 @@ impl App {
 
         // Left: bold "drift" badge in the primary accent.
         let app = " drift ";
-        self.screen
+        self.program.screen_mut()
             .set_str((0, row), app, self.theme.statusbar_logo.clone());
         let mut x = self.width(app);
 
         // File name.
         let name_seg = format!(" {name}");
         let (name_clip, name_w) = self.clip(&name_seg, load_x.saturating_sub(x));
-        self.screen
+        self.program.screen_mut()
             .set_str((x, row), &name_clip, self.theme.statusbar_filename.clone());
         x += name_w;
 
@@ -2730,7 +2731,7 @@ impl App {
                     return;
                 }
                 let (t, tw) = s.clip(text, load_x - *x);
-                s.screen.set_str((*x, row), &t, style);
+                s.program.screen_mut().set_str((*x, row), &t, style);
                 *x += tw;
             };
             put(self, &mut x, " +", self.theme.statusbar_add.clone());
@@ -2762,7 +2763,7 @@ impl App {
         if let Some(badge) = search_badge {
             if x < load_x {
                 let (badge, bw) = self.clip(&badge, load_x - x);
-                self.screen
+                self.program.screen_mut()
                     .set_str((x, row), &badge, self.theme.statusbar_search.clone());
                 x += bw;
             }
@@ -2773,7 +2774,7 @@ impl App {
             if x < load_x {
                 let badge = format!(" {msg} ");
                 let (badge, _) = self.clip(&badge, load_x - x);
-                self.screen
+                self.program.screen_mut()
                     .set_str((x, row), &badge, self.theme.statusbar_add.clone());
             }
         }
@@ -2797,17 +2798,17 @@ impl App {
                 continue;
             }
             let x = 1 + col as u16 * cell_w as u16;
-            self.screen.set_str((x, y), k, key_style.clone());
+            self.program.screen_mut().set_str((x, y), k, key_style.clone());
             let dx = x + key_w + 2;
-            self.screen.set_str((dx, y), v, desc_style.clone());
+            self.program.screen_mut().set_str((dx, y), v, desc_style.clone());
         }
     }
 
     /// Draw a centered dialog with rounded borders, returning the inner
     /// top-left corner. Fills the interior so content underneath is hidden.
     fn draw_box(&mut self, inner_w: u16, inner_h: u16) -> (u16, u16) {
-        let w = self.screen.width();
-        let h = self.screen.height();
+        let w = self.program.screen_mut().width();
+        let h = self.program.screen_mut().height();
         let bw = (inner_w + 2).min(w);
         let bh = (inner_h + 2).min(h);
         // Follow the dragged position (clamped on-screen), else center.
@@ -2822,13 +2823,13 @@ impl App {
 
         let top = format!("╭{}╮", "─".repeat((bw - 2) as usize));
         let bottom = format!("╰{}╯", "─".repeat((bw - 2) as usize));
-        self.screen.set_str((x0, y0), &top, border.clone());
-        self.screen.set_str((x0, y0 + bh - 1), &bottom, border.clone());
+        self.program.screen_mut().set_str((x0, y0), &top, border.clone());
+        self.program.screen_mut().set_str((x0, y0 + bh - 1), &bottom, border.clone());
         for row in 1..bh - 1 {
-            self.screen.set_str((x0, y0 + row), "│", border.clone());
-            self.screen
+            self.program.screen_mut().set_str((x0, y0 + row), "│", border.clone());
+            self.program.screen_mut()
                 .set_str((x0 + 1, y0 + row), &" ".repeat((bw - 2) as usize), fill.clone());
-            self.screen.set_str((x0 + bw - 1, y0 + row), "│", border.clone());
+            self.program.screen_mut().set_str((x0 + bw - 1, y0 + row), "│", border.clone());
         }
         (x0 + 1, y0 + 1)
     }
@@ -2850,7 +2851,7 @@ impl App {
         for row in 0..height {
             let idx = start + row as usize;
             self.draw_file_entry(list_x, row, list_w, idx);
-            self.screen.set_str((div_x, row), "│", border.clone());
+            self.program.screen_mut().set_str((div_x, row), "│", border.clone());
         }
     }
 
@@ -2858,7 +2859,7 @@ impl App {
     /// row `[x, x+w)` on the sidebar surface.
     fn draw_file_entry(&mut self, x: u16, y: u16, w: u16, idx: usize) {
         let surface = self.theme.dialog.clone();
-        self.screen
+        self.program.screen_mut()
             .set_str((x, y), &" ".repeat(w as usize), surface.clone());
         let Some(file) = self.files.get(idx) else {
             return;
@@ -2875,11 +2876,12 @@ impl App {
         } else {
             surface.clone()
         };
-        self.screen.set_str((x, y), &format!("{marker}{name}"), style);
+        self.program.screen_mut().set_str((x, y), &format!("{marker}{name}"), style);
         let cx = x + w - cw;
-        self.screen.set_str(
+        let count_txt = self.clip(&count, cw).0;
+        self.program.screen_mut().set_str(
             (cx, y),
-            &self.clip(&count, cw).0,
+            &count_txt,
             surface.fg(base_fg(&self.theme.header)),
         );
     }
@@ -2887,15 +2889,15 @@ impl App {
     /// Modal diffstat: file names with a scaled, colored +/- bar, like
     /// `git diff --stat`, floating over the diff on a secondary-accent surface.
     fn render_stat_modal(&mut self) {
-        let w = self.screen.width();
-        let h = self.screen.height();
+        let w = self.program.screen_mut().width();
+        let h = self.program.screen_mut().height();
         let (nf, add, del) = diff::totals(&self.files);
         let on_bg = self.theme.dialog.clone();
 
         if self.files.is_empty() {
             self.modal_hit = None;
             let (ix, iy) = self.draw_box(24, 1);
-            self.screen.set_str((ix, iy), "no changes", on_bg.clone());
+            self.program.screen_mut().set_str((ix, iy), "no changes", on_bg.clone());
             return;
         }
 
@@ -2960,7 +2962,7 @@ impl App {
                 on_bg.clone()
             };
             let pad = (name_w as u16).saturating_sub(self.width(&name)) as usize;
-            self.screen
+            self.program.screen_mut()
                 .set_str((ix, y), &format!("{marker}{name}{}", " ".repeat(pad)), name_style);
             let scaled = |n: usize| if n == 0 { 0 } else { ((n * bar_w) / max_count).max(1) };
             let ap = scaled(a);
@@ -2969,11 +2971,11 @@ impl App {
             // box's right edge. Names stay left; the gap floats in the middle.
             let count = format!("{:>count_w$}", a + d);
             let cx = ix + inner_w - bar_w as u16 - 1 - count_w as u16;
-            self.screen.set_str((cx, y), &count, on_bg.clone());
+            self.program.screen_mut().set_str((cx, y), &count, on_bg.clone());
             let bstart = ix + inner_w - (ap + dp) as u16;
-            self.screen
+            self.program.screen_mut()
                 .set_str((bstart, y), &"+".repeat(ap), on_bg.clone().fg(base_fg(&self.theme.add)));
-            self.screen.set_str(
+            self.program.screen_mut().set_str(
                 (bstart + ap as u16, y),
                 &"-".repeat(dp),
                 on_bg.clone().fg(base_fg(&self.theme.remove)),
@@ -2981,9 +2983,10 @@ impl App {
         }
 
         // Summary line (already sized into inner_w above).
-        self.screen.set_str(
+        let summary_txt = self.clip(&summary, inner_w).0;
+        self.program.screen_mut().set_str(
             (ix, iy + inner_h - 1),
-            &self.clip(&summary, inner_w).0,
+            &summary_txt,
             on_bg.bold(),
         );
     }
@@ -3000,7 +3003,7 @@ impl App {
             let hw = self.width(hint);
             if bw >= hw && body_h >= 1 {
                 let hx = bx + (bw - hw) / 2;
-                self.screen
+                self.program.screen_mut()
                     .set_str((hx, body_h - 1), hint, self.theme.context.clone().faint());
             }
         }
@@ -3043,7 +3046,7 @@ impl App {
                 // selection) shows its fg as background, so swap when REVERSE is
                 // set. This keeps the mascot's transparent halves matching what's
                 // actually drawn behind it.
-                let under = self.screen.cell_mut((px, py)).and_then(|c| {
+                let under = self.program.screen_mut().cell_mut((px, py)).and_then(|c| {
                     if c.style.attrs.contains(AttrFlags::REVERSE) {
                         c.style.fg
                     } else {
@@ -3057,7 +3060,7 @@ impl App {
                     (Some(a), Some(b)) if a == b => (" ", Style::default().bg(a)),
                     (Some(a), Some(b)) => ("▀", Style::default().fg(a).bg(b)),
                 };
-                self.screen.set_str((px, py), glyph, style);
+                self.program.screen_mut().set_str((px, py), glyph, style);
             }
         }
     }
@@ -3153,7 +3156,7 @@ impl App {
             if let Some(c) = cbg {
                 dv = dv.bg(c);
             }
-            self.screen.set_str((div_x, y), "│", dv);
+            self.program.screen_mut().set_str((div_x, y), "│", dv);
         }
         self.doc_rows = rows;
     }
@@ -3168,7 +3171,7 @@ impl App {
         if let Some(c) = bg {
             st = st.bg(c);
         }
-        self.screen
+        self.program.screen_mut()
             .set_str((x, y), &"╱".repeat(width as usize), st);
     }
 
@@ -3181,7 +3184,7 @@ impl App {
         let num_w: u16 = self.gutter_w(gut);
         // Wash the whole row so gaps also carry the line/cursor background.
         if let Some(c) = row_bg {
-            self.screen
+            self.program.screen_mut()
                 .set_str((x, y), &" ".repeat(width as usize), Style::default().bg(c));
         }
         // Apply the row background to a style that doesn't set its own.
@@ -3202,7 +3205,7 @@ impl App {
                 Gut::Old => format!("{onum:>4} "),
                 Gut::New => format!("{nnum:>4} "),
             };
-            self.screen
+            self.program.screen_mut()
                 .set_str((cx, y), &gutter, bg(self.theme.line_number.clone()));
         }
         cx += num_w;
@@ -3214,24 +3217,24 @@ impl App {
             RowKind::Context => (" ", &self.theme.context, self.theme.context.clone()),
             RowKind::File => {
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
-                self.screen
+                self.program.screen_mut()
                     .set_str((cx, y), &s, bg(self.theme.header.clone().bold()));
                 return;
             }
             RowKind::Hunk => {
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
-                self.screen
+                self.program.screen_mut()
                     .set_str((cx, y), &s, bg(self.theme.header.clone()));
                 return;
             }
             RowKind::Note => {
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
-                self.screen
+                self.program.screen_mut()
                     .set_str((cx, y), &s, bg(self.theme.context.clone().faint()));
                 return;
             }
         };
-        self.screen.set_str((cx, y), sign, bg(sign_style));
+        self.program.screen_mut().set_str((cx, y), sign, bg(sign_style));
         cx += 1;
 
         let emph_bg = match r.kind {
@@ -3272,19 +3275,19 @@ impl App {
                     style = style.bg(bgc).bold();
                 }
             }
-            self.screen.set_str((screen_x, y), &text, bg(style));
+            self.program.screen_mut().set_str((screen_x, y), &text, bg(style));
         }
     }
 
     pub fn finish(self) -> io::Result<()> {
-        self.screen.finish()
+        self.program.finish()
     }
 
     /// Truncate `s` to at most `width` display columns, respecting grapheme
     /// clusters and wide characters. Uses the screen's own width mode + EAW
     /// policy so a cell budget matches what `set_str` actually paints.
     fn clip(&self, s: &str, width: u16) -> (String, u16) {
-        fit(self.screen.grapheme_cells(s), width)
+        fit(self.program.screen().grapheme_cells(s), width)
     }
 
     /// Like [`Self::clip`] but first drops `skip` leading display columns, so a
@@ -3292,12 +3295,12 @@ impl App {
     /// edge is dropped whole (never split). Returns the slice and its width; at
     /// `skip == 0` it is identical to `clip`.
     fn slice_h(&self, s: &str, skip: u16, width: u16) -> (String, u16) {
-        slice_fit(self.screen.grapheme_cells(s), skip, width)
+        slice_fit(self.program.screen().grapheme_cells(s), skip, width)
     }
 
     /// Display width of `s` in terminal columns under the screen's width mode.
     fn width(&self, s: &str) -> u16 {
-        self.screen.str_width(s)
+        self.program.screen().str_width(s)
     }
 
     /// Shorten `s` to at most `width` display columns, keeping the tail (e.g. a
@@ -3307,8 +3310,8 @@ impl App {
         if self.width(s) <= width {
             return s.to_string();
         }
-        let ell = self.screen.grapheme_width("…") as u16;
-        let cells: Vec<(&str, u8)> = self.screen.grapheme_cells(s).collect();
+        let ell = self.program.screen().grapheme_width("…") as u16;
+        let cells: Vec<(&str, u8)> = self.program.screen().grapheme_cells(s).collect();
         format!("…{}", fit_tail(&cells, width.saturating_sub(ell)))
     }
 }
