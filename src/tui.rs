@@ -839,6 +839,12 @@ impl App {
             mouse: Some(MouseTracking::empty()),
             ..ProgramOptions::default()
         })?;
+        // 0.0.3 no longer probes the terminal at startup. Ask once, and the
+        // event loop below (which observes every event through try_read_event)
+        // adopts synchronized output, grapheme clusters (Unicode core), and
+        // in-band resize as each report comes back — the prefer_* defaults are
+        // all on. Without this query those modes stay off.
+        program.query_capabilities(&[])?;
         program.enter_alt_screen()?;
         program.hide_cursor()?;
         // Paint the whole terminal in the theme's background so unwritten gaps
