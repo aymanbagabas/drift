@@ -2299,9 +2299,13 @@ impl App {
                     }
                 }
             }
-            Event::Resize(ws) => {
+            Event::Resize(_) => {
                 self.clear_sel();
-                self.program.screen_mut().resize((ws.col, ws.row));
+                // autoresize reads the size the OS already knows and repaints
+                // only when the area actually changed. Since 0.0.4 `resize`
+                // repaints unconditionally, and a terminal emits a resize report
+                // per pixel of a window drag, so route reports through this.
+                self.program.autoresize()?;
                 self.move_cursor(0);
                 self.scroll_h(0);
             }
