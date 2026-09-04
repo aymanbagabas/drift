@@ -21,7 +21,8 @@ pub struct Config {
     pub line_numbers: bool,
     /// Expand the commit metadata (author, date, message) below the commit
     /// line for a single commit. The `commit <hash>` line always shows; this
-    /// only controls the detail lines. Toggled with `c` at runtime.
+    /// only controls the detail lines. Toggle at runtime with `enter` or a
+    /// double-click on the commit line.
     pub commit_meta: bool,
     /// Spaces per tab when rendering.
     pub tab_width: usize,

@@ -1450,12 +1450,11 @@ impl App {
             ("/", "search"),
             ("n/N", "next/prev match"),
             ("s", "split view"),
-            ("c", "commit info"),
             ("F", "files"),
             ("B", "sidebar"),
             ("w", "watch on/off"),
             ("a", "untracked on/off"),
-            ("enter", "expand context"),
+            ("enter", "expand context / commit info"),
             ("v", "edit in $EDITOR"),
             ("y", "copy line/selection"),
             ("V", "select lines"),
@@ -1465,8 +1464,20 @@ impl App {
             ("q", "quit"),
         ]
         .into_iter()
-        .filter(|(k, _)| !(piped && matches!(*k, "w" | "a" | "enter" | "r")))
-        .filter(|(k, _)| !(*k == "c" && self.commit_meta.len() <= 1))
+        .filter(|(k, _)| {
+            if piped {
+                // Repo-driven affordances are inert on a static piped diff.
+                if matches!(*k, "w" | "a" | "r") {
+                    return false;
+                }
+                // `enter` expands context (inert when piped) but also toggles
+                // commit metadata, so keep it for a piped `git show`.
+                if *k == "enter" && self.commit_meta.is_empty() {
+                    return false;
+                }
+            }
+            true
+        })
         .collect()
     }
 
@@ -2215,12 +2226,6 @@ impl App {
                     self.select_file(-1);
                 } else if k.matches("s") {
                     self.split = !self.split;
-                } else if k.matches("c") {
-                    // Show/hide the commit-metadata header. A no-op when there
-                    // is no metadata (worktree/staged diffs, plain `git diff`).
-                    if !self.commit_meta.is_empty() {
-                        self.toggle_meta();
-                    }
                 } else if k.matches("F") {
                     self.view = View::Stat;
                 } else if k.matches("B") {

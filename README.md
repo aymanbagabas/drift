@@ -164,14 +164,13 @@ Some flags worth knowing:
 | `/` | Search the current file (regex, smart-case) |
 | `n` `N` | Next / previous match |
 | `s` | Toggle split view |
-| `c` | Expand / collapse the commit metadata (commit line always shows) |
 | `F` | File list modal |
 | `B` | Toggle the file sidebar |
 | `w` | Toggle watch mode |
 | `V` | Start / cancel a line selection; any motion key extends it |
 | `y` | Copy the selection, or the cursor line when nothing is selected |
 | `Y` | Copy the whole current file |
-| `enter` | Expand folded context, or open the file at the cursor |
+| `enter` | On a hunk header, expand folded context; on the commit line, expand / collapse the commit metadata |
 | `v` | Open the current file in `$EDITOR` |
 | `r` | Refresh |
 | `?` | Toggle the help footer |

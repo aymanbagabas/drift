@@ -56,7 +56,8 @@ struct Cli {
     no_syntax: bool,
 
     /// Collapse the commit metadata to just the commit line by default (the
-    /// author, date, and message stay hidden until you expand with `c`).
+    /// author, date, and message stay hidden until you expand it — `enter` or
+    /// a double-click on the commit line).
     #[arg(long = "no-commit-meta")]
     no_commit_meta: bool,
 
