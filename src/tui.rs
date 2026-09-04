@@ -1015,7 +1015,8 @@ impl App {
     }
 
     /// Number of leading metadata rows currently in the document: the always-on
-    /// commit line, plus the detail lines when expanded.
+    /// commit line, plus the detail lines (and the preamble's trailing blank
+    /// separator) when expanded.
     fn meta_len(&self) -> usize {
         if self.commit_meta.is_empty() {
             0
@@ -1057,12 +1058,13 @@ impl App {
         self.program.screen_mut().invalidate();
     }
 
-    /// Whether the cursor sits on a commit-metadata row (the commit line or a
-    /// detail line), for the click/enter expand gesture.
-    fn on_commit_meta(&self) -> bool {
+    /// Whether the cursor sits on the commit line — the toggle handle for the
+    /// commit metadata. Detail lines are not handles (like a hunk header vs. its
+    /// body), so `enter` / double-click only act here.
+    fn on_commit_line(&self) -> bool {
         matches!(
             self.doc_rows.get(self.cursor).map(|r| r.kind),
-            Some(RowKind::CommitLine) | Some(RowKind::Meta)
+            Some(RowKind::CommitLine)
         )
     }
 
@@ -2252,7 +2254,7 @@ impl App {
                     // Enter expands folded context on a hunk header, or the
                     // commit metadata on the commit line; it no longer opens
                     // the editor (use `v` for that).
-                    if self.on_commit_meta() {
+                    if self.on_commit_line() {
                         self.toggle_meta();
                     } else if self.on_hunk() && !matches!(self.source, Source::Stdin) {
                         self.expand_here();
@@ -2360,10 +2362,10 @@ impl App {
                                 && now.duration_since(t) < Duration::from_millis(400)
                         });
                         self.last_click = Some((now, m.x, m.y));
-                        if dbl && self.on_commit_meta() {
-                            // Double-click the commit line (or its detail lines)
-                            // to expand/collapse the metadata, like double-click
-                            // to expand context. Works for piped `git show` too.
+                        if dbl && self.on_commit_line() {
+                            // Double-click the commit line to expand/collapse
+                            // the metadata, like double-click to expand context
+                            // on a hunk header. Works for piped `git show` too.
                             self.clear_sel();
                             self.last_click = None;
                             self.toggle_meta();
