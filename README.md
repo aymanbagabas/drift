@@ -141,6 +141,7 @@ Some flags worth knowing:
 | `-C`, `--directory DIR` | Run as if started in `DIR` (worktrees, bare repos) |
 | `-c`, `--config FILE` | Use a specific config file |
 | `--no-syntax` | Turn off syntax highlighting for this run |
+| `--no-commit-meta` | Collapse the commit metadata to just the commit line |
 | `-U`, `--context N` | Lines of context around each change |
 | `--ignore-whitespace` | Ignore whitespace-only changes |
 | `--diff-algorithm ALGO` | `myers`, `minimal`, `patience`, or `histogram` |
@@ -163,6 +164,7 @@ Some flags worth knowing:
 | `/` | Search the current file (regex, smart-case) |
 | `n` `N` | Next / previous match |
 | `s` | Toggle split view |
+| `c` | Expand / collapse the commit metadata (commit line always shows) |
 | `F` | File list modal |
 | `B` | Toggle the file sidebar |
 | `w` | Toggle watch mode |
@@ -185,6 +187,8 @@ drift is fully mouse-driven too:
 - Drag the sidebar's divider to resize it, live.
 - In split view, drag the divider between the two panes to rebalance them.
 - Click the `? help` badge in the status bar to toggle the help footer.
+- Double-click the commit line to expand or collapse the commit metadata; on a
+  hunk header, double-click expands the folded context.
 - Drag across the diff to select text; it lands on your system clipboard (over
   SSH too, via OSC 52). In split view the selection stays within one pane, so
   you copy just the old or just the new side.
@@ -241,6 +245,7 @@ theme         = "onedark"   # any built-in or syntect theme name
 syntax        = true        # highlight diff content
 intraline     = true        # word-level change emphasis
 line-numbers  = true        # old/new line-number gutter
+commit-meta   = true        # expand author/date/message; the commit line always shows for a single commit
 tab-width     = 4
 editor        = ""          # falls back to $VISUAL, then $EDITOR, then vi
 sidebar       = "auto"      # "auto" (opens at width >= 150), "always", or "never"

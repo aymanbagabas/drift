@@ -19,6 +19,10 @@ pub struct Config {
     pub intraline: bool,
     /// Show old/new line numbers in the gutter.
     pub line_numbers: bool,
+    /// Expand the commit metadata (author, date, message) below the commit
+    /// line for a single commit. The `commit <hash>` line always shows; this
+    /// only controls the detail lines. Toggled with `c` at runtime.
+    pub commit_meta: bool,
     /// Spaces per tab when rendering.
     pub tab_width: usize,
     /// Sidebar visibility: "auto" (open when terminal >= 150 wide, default),
@@ -79,6 +83,7 @@ impl Default for Config {
             syntax: true,
             intraline: true,
             line_numbers: true,
+            commit_meta: true,
             tab_width: 4,
             sidebar: "auto".to_string(),
             sidebar_width: 30,

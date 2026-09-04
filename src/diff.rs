@@ -118,6 +118,24 @@ pub fn split_files(input: &str) -> Vec<String> {
     sections
 }
 
+/// Extract the commit metadata that precedes the first `diff --git` block, as
+/// produced by `git show` (commit line, author/date fields, and the indented
+/// message). Returns the raw lines with trailing blank lines trimmed. Empty
+/// when the input has no preamble (plain `git diff`, worktree/staged diffs).
+pub fn preamble(input: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for line in input.lines() {
+        if line.starts_with("diff --git") {
+            break;
+        }
+        lines.push(line.to_string());
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
+}
+
 /// Parse a unified diff (as produced by `git diff` / `git show`) into files.
 pub fn parse(input: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
@@ -350,6 +368,22 @@ fn split_words(s: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preamble_captures_commit_header_and_drops_trailing_blanks() {
+        let show = "commit abc123\nAuthor:     A U Thor <a@u.thor>\nAuthorDate: Mon Jan 1 00:00:00 2024\n\n    Subject line\n\n    Body paragraph.\n\ndiff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+        let meta = preamble(show);
+        assert_eq!(meta.first().unwrap(), "commit abc123");
+        assert_eq!(meta.last().unwrap(), "    Body paragraph.");
+        assert!(meta.iter().any(|l| l == "    Subject line"));
+        // The blank lines between the message and the diff are trimmed.
+        assert!(!meta.last().unwrap().trim().is_empty());
+    }
+
+    #[test]
+    fn preamble_is_empty_for_plain_diff() {
+        assert!(preamble(SAMPLE).is_empty());
+    }
 
     const SAMPLE: &str = "diff --git a/src/main.rs b/src/main.rs\n\
 index 1234567..89abcde 100644\n\
