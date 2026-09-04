@@ -120,8 +120,9 @@ pub fn split_files(input: &str) -> Vec<String> {
 
 /// Extract the commit metadata that precedes the first `diff --git` block, as
 /// produced by `git show` (commit line, author/date fields, and the indented
-/// message). Returns the raw lines with trailing blank lines trimmed. Empty
-/// when the input has no preamble (plain `git diff`, worktree/staged diffs).
+/// message). Returns the raw lines with a single trailing blank line, so the
+/// metadata is separated from the diff below it. Empty when the input has no
+/// preamble (plain `git diff`, worktree/staged diffs).
 pub fn preamble(input: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for line in input.lines() {
@@ -132,6 +133,10 @@ pub fn preamble(input: &str) -> Vec<String> {
     }
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
+    }
+    // Keep one trailing blank as a separator before the diff.
+    if !lines.is_empty() {
+        lines.push(String::new());
     }
     lines
 }
@@ -370,14 +375,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preamble_captures_commit_header_and_drops_trailing_blanks() {
-        let show = "commit abc123\nAuthor:     A U Thor <a@u.thor>\nAuthorDate: Mon Jan 1 00:00:00 2024\n\n    Subject line\n\n    Body paragraph.\n\ndiff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+    fn preamble_captures_header_and_ends_with_one_blank() {
+        let show = "commit abc123\nAuthor:     A U Thor <a@u.thor>\nAuthorDate: Mon Jan 1 00:00:00 2024\n\n    Subject line\n\n    Body paragraph.\n\n\ndiff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
         let meta = preamble(show);
         assert_eq!(meta.first().unwrap(), "commit abc123");
-        assert_eq!(meta.last().unwrap(), "    Body paragraph.");
         assert!(meta.iter().any(|l| l == "    Subject line"));
-        // The blank lines between the message and the diff are trimmed.
-        assert!(!meta.last().unwrap().trim().is_empty());
+        assert!(meta.iter().any(|l| l == "    Body paragraph."));
+        // Multiple trailing blanks collapse to exactly one separator line.
+        assert_eq!(meta.last().unwrap(), "");
+        assert_ne!(meta[meta.len() - 2], "");
     }
 
     #[test]
