@@ -34,6 +34,9 @@ struct Theme {
     remove: Style,
     context: Style,
     header: Style,
+    /// Commit metadata detail lines: the header color, but not bold, so only
+    /// the commit line stands out.
+    meta: Style,
     line_number: Style,
     add_emph_bg: Option<Color>,
     remove_emph_bg: Option<Color>,
@@ -92,6 +95,7 @@ impl Theme {
             remove: sty("remove"),
             context: sty("context"),
             header: sty("header"),
+            meta: sty("meta"),
             line_number: sty("line-number"),
             add_emph_bg: pal.color("add-emph"),
             remove_emph_bg: pal.color("remove-emph"),
@@ -3386,11 +3390,11 @@ impl App {
                 return;
             }
             RowKind::Meta => {
-                // Same style as the diff headers, drawn full width (no gutter or
-                // sign column), so the commit header reads as one block.
+                // Same color as the diff headers, but not bold, so only the
+                // commit line stands out. Drawn full width (no gutter or sign).
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.program.screen_mut()
-                    .set_str((cx, y), &s, bg(self.theme.header.clone()));
+                    .set_str((cx, y), &s, bg(self.theme.meta.clone()));
                 return;
             }
             RowKind::Note => {

@@ -587,6 +587,7 @@ pub fn builtin_style(theme: &str, component: &str) -> &'static str {
         "remove" => "remove",
         "context" => "context",
         "header" => "header bold",
+        "meta" => "header",
         "line-number" => "line-number",
         "statusbar" => "foreground surface",
         "statusbar-logo" => "background primary bold",
