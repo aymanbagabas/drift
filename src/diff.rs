@@ -122,14 +122,23 @@ pub fn split_files(input: &str) -> Vec<String> {
 /// produced by `git show` (commit line, author/date fields, and the indented
 /// message). Returns the raw lines with a single trailing blank line, so the
 /// metadata is separated from the diff below it. Empty when the input has no
-/// preamble (plain `git diff`, worktree/staged diffs).
+/// preamble (plain `git diff`, worktree/staged diffs) or no `diff --git` block
+/// at all (e.g. a combined merge diff, `diff --cc`), so non-diff output isn't
+/// mistaken for commit metadata.
 pub fn preamble(input: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
+    let mut found_diff = false;
     for line in input.lines() {
         if line.starts_with("diff --git") {
+            found_diff = true;
             break;
         }
         lines.push(line.to_string());
+    }
+    // Without a `diff --git` boundary there is no diff for these lines to
+    // precede, so don't treat them as a commit-metadata preamble.
+    if !found_diff {
+        return Vec::new();
     }
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -389,6 +398,16 @@ mod tests {
     #[test]
     fn preamble_is_empty_for_plain_diff() {
         assert!(preamble(SAMPLE).is_empty());
+    }
+
+    #[test]
+    fn preamble_is_empty_without_a_diff_git_block() {
+        // A combined merge diff (`diff --cc`) has no `diff --git`; its lines
+        // must not be mistaken for commit metadata.
+        let cc = "commit abc123\nMerge: 111 222\n\n    Merge branch\n\ndiff --cc f\nindex 1,2..3\n--- a/f\n+++ b/f\n@@@ -1,1 -1,1 +1,1 @@@\n- a\n +b\n";
+        assert!(preamble(cc).is_empty());
+        // Arbitrary non-diff text is likewise not a preamble.
+        assert!(preamble("just some text\nwith no diff\n").is_empty());
     }
 
     const SAMPLE: &str = "diff --git a/src/main.rs b/src/main.rs\n\

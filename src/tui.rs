@@ -712,8 +712,9 @@ pub struct App {
     /// message) that precede the diff, captured from the source's preamble.
     /// Empty for worktree/staged diffs and plain `git diff` input.
     commit_meta: Vec<String>,
-    /// Whether the commit metadata header is shown; toggled with `c`, seeded
-    /// from `config.commit_meta`.
+    /// Whether the commit metadata detail lines are expanded; the commit line
+    /// always shows. Toggled with `enter` or a double-click on the commit line,
+    /// seeded from `config.commit_meta`.
     show_meta: bool,
     /// The raw unified-diff text for each file, in the same order as `files`,
     /// so `Y` can copy an exact per-file patch without reconstructing it.
@@ -979,7 +980,8 @@ impl App {
 
     /// Build the commit-metadata rows and place them at the top of the document,
     /// so the incremental file builders (`drain_prefetch` / `drain_stream`)
-    /// append the diff below them. A no-op when metadata is hidden or absent.
+    /// append the diff below them. Adds the commit line (plus the detail lines
+    /// when expanded) for a single commit; a no-op when there is no commit.
     fn push_meta_rows(&mut self) {
         // Meta rows precede the first file, so `file_starts` (pushed as
         // `doc_rows.len()` on each drain) is offset by them automatically.

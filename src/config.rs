@@ -173,6 +173,7 @@ impl Config {
                     "syntax" => self.syntax = parse_bool(val, self.syntax),
                     "intraline" => self.intraline = parse_bool(val, self.intraline),
                     "line-numbers" => self.line_numbers = parse_bool(val, self.line_numbers),
+                    "commit-meta" => self.commit_meta = parse_bool(val, self.commit_meta),
                     "tab-width" => self.tab_width = val.parse().unwrap_or(self.tab_width),
                     "sidebar" => self.sidebar = val.to_string(),
                     "sidebar-width" => {
