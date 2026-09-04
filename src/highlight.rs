@@ -18,7 +18,12 @@ pub struct Highlighter {
 
 impl Highlighter {
     pub fn new(theme_name: &str, enabled: bool) -> Self {
-        let syntaxes = two_face::syntax::extra_newlines();
+        // Feed lines without a trailing newline (see `FileHighlighter::line`),
+        // so use the syntax set built for that. The `_newlines` variant expects
+        // each line to end in `\n`; pairing it with newline-stripped input left
+        // newline-sensitive contexts (notably C's `#include`/preprocessor) open,
+        // which suppressed highlighting on every following line.
+        let syntaxes = two_face::syntax::extra_no_newlines();
         // The `ansi` palette holds ANSI color names (not hex) and is meant to
         // run with syntax highlighting off, so it never builds a syntect theme.
         let theme = match builtin_named(theme_name) {
@@ -157,5 +162,29 @@ mod tests {
             let colored = spans.iter().filter(|(c, _)| c.is_some()).count();
             assert!(colored > 0, "{path} produced no colored spans");
         }
+    }
+
+    /// Lines are fed without a trailing newline, so the syntax set must not be
+    /// the `_newlines` variant. With that mismatch, C's `#include` context
+    /// stayed open and flattened every following line (`int main` etc.), which
+    /// broke highlighting for whole C/H files. Distinct colors past line 1
+    /// prove the context closes.
+    #[test]
+    fn c_highlights_after_preprocessor_directive() {
+        let hl = Highlighter::new("onedark", true);
+        let mut f = hl.file("prog.c");
+        for l in ["#include <stdio.h>", ""] {
+            let _ = f.line(l);
+        }
+        let spans = f.line("int main(void) {");
+        let colors: std::collections::HashSet<String> = spans
+            .iter()
+            .filter_map(|(c, t)| c.filter(|_| !t.trim().is_empty()).map(|c| format!("{c:?}")))
+            .collect();
+        assert!(
+            colors.len() > 1,
+            "C line after #include should be highlighted, got {} color(s)",
+            colors.len()
+        );
     }
 }
