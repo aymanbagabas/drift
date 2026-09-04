@@ -947,9 +947,13 @@ impl App {
         if matches!(self.source, Source::Stdin) {
             // The pre-screen peek already read the commit header (everything up
             // to the first `diff --git`), so capture it from the prefix before
-            // the streamer consumes it.
+            // the streamer consumes it. Git colorizes the diff it pipes to a
+            // pager, so strip ANSI first: otherwise a colorized `diff --git`
+            // line isn't recognized as the diff boundary and its escape codes
+            // leak into the "metadata".
             if let Some(p) = &self.stream_prefix {
-                self.commit_meta = diff::preamble(&String::from_utf8_lossy(p));
+                let text = uncurses::ansi::strip::strip(&String::from_utf8_lossy(p));
+                self.commit_meta = diff::preamble(&text);
             }
             self.push_meta_rows();
             self.spawn_stream();
