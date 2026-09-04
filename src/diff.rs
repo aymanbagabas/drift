@@ -118,6 +118,38 @@ pub fn split_files(input: &str) -> Vec<String> {
     sections
 }
 
+/// Extract the commit metadata that precedes the first `diff --git` block, as
+/// produced by `git show` (commit line, author/date fields, and the indented
+/// message). Returns the raw lines with a single trailing blank line, so the
+/// metadata is separated from the diff below it. Empty when the input has no
+/// preamble (plain `git diff`, worktree/staged diffs) or no `diff --git` block
+/// at all (e.g. a combined merge diff, `diff --cc`), so non-diff output isn't
+/// mistaken for commit metadata.
+pub fn preamble(input: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut found_diff = false;
+    for line in input.lines() {
+        if line.starts_with("diff --git") {
+            found_diff = true;
+            break;
+        }
+        lines.push(line.to_string());
+    }
+    // Without a `diff --git` boundary there is no diff for these lines to
+    // precede, so don't treat them as a commit-metadata preamble.
+    if !found_diff {
+        return Vec::new();
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    // Keep one trailing blank as a separator before the diff.
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// Parse a unified diff (as produced by `git diff` / `git show`) into files.
 pub fn parse(input: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
@@ -350,6 +382,33 @@ fn split_words(s: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preamble_captures_header_and_ends_with_one_blank() {
+        let show = "commit abc123\nAuthor:     A U Thor <a@u.thor>\nAuthorDate: Mon Jan 1 00:00:00 2024\n\n    Subject line\n\n    Body paragraph.\n\n\ndiff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+        let meta = preamble(show);
+        assert_eq!(meta.first().unwrap(), "commit abc123");
+        assert!(meta.iter().any(|l| l == "    Subject line"));
+        assert!(meta.iter().any(|l| l == "    Body paragraph."));
+        // Multiple trailing blanks collapse to exactly one separator line.
+        assert_eq!(meta.last().unwrap(), "");
+        assert_ne!(meta[meta.len() - 2], "");
+    }
+
+    #[test]
+    fn preamble_is_empty_for_plain_diff() {
+        assert!(preamble(SAMPLE).is_empty());
+    }
+
+    #[test]
+    fn preamble_is_empty_without_a_diff_git_block() {
+        // A combined merge diff (`diff --cc`) has no `diff --git`; its lines
+        // must not be mistaken for commit metadata.
+        let cc = "commit abc123\nMerge: 111 222\n\n    Merge branch\n\ndiff --cc f\nindex 1,2..3\n--- a/f\n+++ b/f\n@@@ -1,1 -1,1 +1,1 @@@\n- a\n +b\n";
+        assert!(preamble(cc).is_empty());
+        // Arbitrary non-diff text is likewise not a preamble.
+        assert!(preamble("just some text\nwith no diff\n").is_empty());
+    }
 
     const SAMPLE: &str = "diff --git a/src/main.rs b/src/main.rs\n\
 index 1234567..89abcde 100644\n\

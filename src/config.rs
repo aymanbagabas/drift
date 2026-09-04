@@ -19,6 +19,11 @@ pub struct Config {
     pub intraline: bool,
     /// Show old/new line numbers in the gutter.
     pub line_numbers: bool,
+    /// Expand the commit metadata (author, date, message) below the commit
+    /// line for a single commit. The `commit <hash>` line always shows; this
+    /// only controls the detail lines. Toggle at runtime with `enter` or a
+    /// double-click on the commit line.
+    pub commit_meta: bool,
     /// Spaces per tab when rendering.
     pub tab_width: usize,
     /// Sidebar visibility: "auto" (open when terminal >= 150 wide, default),
@@ -79,6 +84,7 @@ impl Default for Config {
             syntax: true,
             intraline: true,
             line_numbers: true,
+            commit_meta: true,
             tab_width: 4,
             sidebar: "auto".to_string(),
             sidebar_width: 30,
@@ -167,6 +173,7 @@ impl Config {
                     "syntax" => self.syntax = parse_bool(val, self.syntax),
                     "intraline" => self.intraline = parse_bool(val, self.intraline),
                     "line-numbers" => self.line_numbers = parse_bool(val, self.line_numbers),
+                    "commit-meta" => self.commit_meta = parse_bool(val, self.commit_meta),
                     "tab-width" => self.tab_width = val.parse().unwrap_or(self.tab_width),
                     "sidebar" => self.sidebar = val.to_string(),
                     "sidebar-width" => {
@@ -582,6 +589,7 @@ pub fn builtin_style(theme: &str, component: &str) -> &'static str {
         "remove" => "remove",
         "context" => "context",
         "header" => "header bold",
+        "meta" => "header",
         "line-number" => "line-number",
         "statusbar" => "foreground surface",
         "statusbar-logo" => "background primary bold",

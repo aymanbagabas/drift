@@ -34,6 +34,9 @@ struct Theme {
     remove: Style,
     context: Style,
     header: Style,
+    /// Commit metadata detail lines: the header color, but not bold, so only
+    /// the commit line stands out.
+    meta: Style,
     line_number: Style,
     add_emph_bg: Option<Color>,
     remove_emph_bg: Option<Color>,
@@ -92,6 +95,7 @@ impl Theme {
             remove: sty("remove"),
             context: sty("context"),
             header: sty("header"),
+            meta: sty("meta"),
             line_number: sty("line-number"),
             add_emph_bg: pal.color("add-emph"),
             remove_emph_bg: pal.color("remove-emph"),
@@ -138,6 +142,13 @@ enum RowKind {
     Remove,
     Context,
     Note,
+    /// The `commit <hash>` line: always shown (when a commit is present) and
+    /// bold, like the `diff --git` file header. Acts as the expand/collapse
+    /// handle for the rest of the metadata.
+    CommitLine,
+    /// A commit-metadata detail line (author, date, message) shown below the
+    /// commit line when expanded.
+    Meta,
 }
 
 /// Which top-level view is showing.
@@ -697,6 +708,14 @@ pub struct App {
     opts: crate::git::Opts,
     toplevel: Option<PathBuf>,
     files: Vec<FileDiff>,
+    /// Commit metadata lines (the `git show` header: hash, author, date, and
+    /// message) that precede the diff, captured from the source's preamble.
+    /// Empty for worktree/staged diffs and plain `git diff` input.
+    commit_meta: Vec<String>,
+    /// Whether the commit metadata detail lines are expanded; the commit line
+    /// always shows. Toggled with `enter` or a double-click on the commit line,
+    /// seeded from `config.commit_meta`.
+    show_meta: bool,
     /// The raw unified-diff text for each file, in the same order as `files`,
     /// so `Y` can copy an exact per-file patch without reconstructing it.
     raw_files: Vec<String>,
@@ -856,6 +875,7 @@ impl App {
         // Enable mouse now rather than waiting for the capability-query reply,
         // so clicks and wheel work immediately (and in non-interactive tests).
         program.enable_mouse(MouseTracking::empty())?;
+        let show_meta = config.commit_meta;
         let mut app = App {
             program,
             config,
@@ -865,6 +885,8 @@ impl App {
             opts,
             toplevel: crate::git::toplevel(),
             files: Vec::new(),
+            commit_meta: Vec::new(),
+            show_meta,
             raw_files: Vec::new(),
             doc_rows: Vec::new(),
             file_starts: Vec::new(),
@@ -921,8 +943,20 @@ impl App {
         self.scroll = 0;
         self.doc_rows.clear();
         self.file_starts.clear();
+        self.commit_meta.clear();
 
         if matches!(self.source, Source::Stdin) {
+            // The pre-screen peek already read the commit header (everything up
+            // to the first `diff --git`), so capture it from the prefix before
+            // the streamer consumes it. Git colorizes the diff it pipes to a
+            // pager, so strip ANSI first: otherwise a colorized `diff --git`
+            // line isn't recognized as the diff boundary and its escape codes
+            // leak into the "metadata".
+            if let Some(p) = &self.stream_prefix {
+                let text = uncurses::ansi::strip::strip(&String::from_utf8_lossy(p));
+                self.commit_meta = diff::preamble(&text);
+            }
+            self.push_meta_rows();
             self.spawn_stream();
             return;
         }
@@ -931,6 +965,7 @@ impl App {
             Ok(text) => {
                 self.files = diff::parse(&text);
                 self.raw_files = diff::split_files(&text);
+                self.commit_meta = diff::preamble(&text);
                 self.last_diff = text;
             }
             Err(_) => {
@@ -939,7 +974,101 @@ impl App {
                 self.last_diff.clear();
             }
         }
+        self.push_meta_rows();
         self.spawn_prefetch();
+    }
+
+    /// Build the commit-metadata rows and place them at the top of the document,
+    /// so the incremental file builders (`drain_prefetch` / `drain_stream`)
+    /// append the diff below them. Adds the commit line (plus the detail lines
+    /// when expanded) for a single commit; a no-op when there is no commit.
+    fn push_meta_rows(&mut self) {
+        // Meta rows precede the first file, so `file_starts` (pushed as
+        // `doc_rows.len()` on each drain) is offset by them automatically.
+        self.doc_rows.extend(self.meta_rows());
+    }
+
+    /// The leading commit-metadata rows: the bold `commit <hash>` line always,
+    /// plus the detail lines (author, date, message) when expanded. Empty when
+    /// there is no commit (worktree/staged diffs, plain `git diff`).
+    fn meta_rows(&self) -> Vec<Row> {
+        if self.commit_meta.is_empty() {
+            return Vec::new();
+        }
+        let tab = self.config.tab_width;
+        let meta_line = |kind: RowKind, line: &str| {
+            let mut spans = vec![Span {
+                fg: None,
+                changed: false,
+                text: line.to_string(),
+            }];
+            // Expand tabs like diff content does, so a tab in a commit message
+            // renders and measures correctly instead of writing a raw `\t` that
+            // desyncs the cell/column model.
+            expand_tabs(&mut spans, tab);
+            Row::new(kind, None, None, spans)
+        };
+        let mut rows = vec![meta_line(RowKind::CommitLine, &self.commit_meta[0])];
+        if self.show_meta {
+            for line in &self.commit_meta[1..] {
+                rows.push(meta_line(RowKind::Meta, line));
+            }
+        }
+        rows
+    }
+
+    /// Number of leading metadata rows currently in the document: the always-on
+    /// commit line, plus the detail lines (and the preamble's trailing blank
+    /// separator) when expanded.
+    fn meta_len(&self) -> usize {
+        if self.commit_meta.is_empty() {
+            0
+        } else if self.show_meta {
+            self.commit_meta.len()
+        } else {
+            1
+        }
+    }
+
+    /// Expand or collapse the commit-metadata detail lines in place. The commit
+    /// line always stays; this swaps the leading meta rows and shifts
+    /// `file_starts`, cursor, and scroll — no re-highlighting.
+    fn toggle_meta(&mut self) {
+        // Nothing to expand when there is only the commit line (or no commit).
+        if self.commit_meta.len() <= 1 {
+            return;
+        }
+        let old = self.meta_len();
+        self.show_meta = !self.show_meta;
+        let rows = self.meta_rows();
+        let new = rows.len();
+        self.doc_rows.splice(0..old, rows);
+        let delta = new as isize - old as isize;
+        let shift = |i: usize| -> usize {
+            if i >= old {
+                (i as isize + delta).max(0) as usize
+            } else {
+                // Inside the old meta region: clamp to the last surviving meta row.
+                i.min(new.saturating_sub(1))
+            }
+        };
+        for s in &mut self.file_starts {
+            *s = shift(*s);
+        }
+        self.cursor = shift(self.cursor);
+        self.scroll = shift(self.scroll);
+        self.move_cursor(0);
+        self.program.screen_mut().invalidate();
+    }
+
+    /// Whether the cursor sits on the commit line — the toggle handle for the
+    /// commit metadata. Detail lines are not handles (like a hunk header vs. its
+    /// body), so `enter` / double-click only act here.
+    fn on_commit_line(&self) -> bool {
+        matches!(
+            self.doc_rows.get(self.cursor).map(|r| r.kind),
+            Some(RowKind::CommitLine)
+        )
     }
 
     /// Stream a piped diff from stdin, emitting each file as its `diff --git`
@@ -1129,6 +1258,7 @@ impl App {
         // land after the swap.
         self.prefetch = None;
         self.last_diff = text.clone();
+        self.commit_meta = diff::preamble(&text);
         let hl = Arc::clone(&self.highlighter);
         let intraline = self.config.intraline_enabled();
         let tab = self.config.tab_width;
@@ -1159,8 +1289,14 @@ impl App {
                 let anchor = self.capture_anchor();
                 self.files = r.files;
                 self.raw_files = r.raw;
-                self.doc_rows = r.doc;
-                self.file_starts = r.starts;
+                // Prepend the commit-metadata rows (built on the main thread;
+                // the worker only assembles file rows), shifting file starts.
+                let meta = self.meta_rows();
+                let offset = meta.len();
+                let mut doc = meta;
+                doc.extend(r.doc);
+                self.doc_rows = doc;
+                self.file_starts = r.starts.iter().map(|s| s + offset).collect();
                 let row = self.resolve_anchor(&anchor);
                 self.cursor = row;
                 self.scroll = row.saturating_sub(anchor.screen_off);
@@ -1321,7 +1457,7 @@ impl App {
             ("B", "sidebar"),
             ("w", "watch on/off"),
             ("a", "untracked on/off"),
-            ("enter", "expand context"),
+            ("enter", "expand context / commit info"),
             ("v", "edit in $EDITOR"),
             ("y", "copy line/selection"),
             ("V", "select lines"),
@@ -1331,7 +1467,20 @@ impl App {
             ("q", "quit"),
         ]
         .into_iter()
-        .filter(|(k, _)| !(piped && matches!(*k, "w" | "a" | "enter" | "r")))
+        .filter(|(k, _)| {
+            if piped {
+                // Repo-driven affordances are inert on a static piped diff.
+                if matches!(*k, "w" | "a" | "r") {
+                    return false;
+                }
+                // `enter` expands context (inert when piped) but also toggles
+                // commit metadata, so keep it for a piped `git show`.
+                if *k == "enter" && self.commit_meta.is_empty() {
+                    return false;
+                }
+            }
+            true
+        })
         .collect()
     }
 
@@ -1587,7 +1736,7 @@ impl App {
         let bx = self.body_x();
         match pane {
             None => (bx, self.content_start(kind, Gut::Both)),
-            Some(_) if matches!(kind, RowKind::Hunk | RowKind::Note | RowKind::File) => {
+            Some(_) if matches!(kind, RowKind::Hunk | RowKind::Note | RowKind::File | RowKind::Meta | RowKind::CommitLine) => {
                 (bx, self.content_start(kind, Gut::Both))
             }
             Some(Pane::Left) => (bx, self.content_start(kind, Gut::Old)),
@@ -1606,11 +1755,11 @@ impl App {
             None => true,
             Some(Pane::Left) => matches!(
                 kind,
-                RowKind::Context | RowKind::Remove | RowKind::Hunk | RowKind::Note | RowKind::File
+                RowKind::Context | RowKind::Remove | RowKind::Hunk | RowKind::Note | RowKind::File | RowKind::Meta | RowKind::CommitLine
             ),
             Some(Pane::Right) => matches!(
                 kind,
-                RowKind::Context | RowKind::Add | RowKind::Hunk | RowKind::Note | RowKind::File
+                RowKind::Context | RowKind::Add | RowKind::Hunk | RowKind::Note | RowKind::File | RowKind::Meta | RowKind::CommitLine
             ),
         }
     }
@@ -1740,6 +1889,14 @@ impl App {
 
     /// Open the file (and the cursor line) in the editor.
     fn open_editor(&mut self) -> io::Result<()> {
+        // A commit-metadata row has no file to open; `selected` still points at
+        // file 0, so guard against opening an arbitrary file from the header.
+        if matches!(
+            self.doc_rows.get(self.cursor).map(|r| r.kind),
+            Some(RowKind::CommitLine) | Some(RowKind::Meta)
+        ) {
+            return Ok(());
+        }
         let Some(file) = self.files.get(self.selected) else {
             return Ok(());
         };
@@ -2110,9 +2267,12 @@ impl App {
                 } else if k.matches("v") {
                     self.open_editor()?;
                 } else if k.matches("enter") {
-                    // Enter expands folded context on a hunk header; it no
-                    // longer opens the editor (use `v` for that).
-                    if self.on_hunk() && !matches!(self.source, Source::Stdin) {
+                    // Enter expands folded context on a hunk header, or the
+                    // commit metadata on the commit line; it no longer opens
+                    // the editor (use `v` for that).
+                    if self.on_commit_line() {
+                        self.toggle_meta();
+                    } else if self.on_hunk() && !matches!(self.source, Source::Stdin) {
                         self.expand_here();
                     }
                 } else if k.matches("r") {
@@ -2218,7 +2378,14 @@ impl App {
                                 && now.duration_since(t) < Duration::from_millis(400)
                         });
                         self.last_click = Some((now, m.x, m.y));
-                        if dbl && self.on_hunk() && !matches!(self.source, Source::Stdin) {
+                        if dbl && self.on_commit_line() {
+                            // Double-click the commit line to expand/collapse
+                            // the metadata, like double-click to expand context
+                            // on a hunk header. Works for piped `git show` too.
+                            self.clear_sel();
+                            self.last_click = None;
+                            self.toggle_meta();
+                        } else if dbl && self.on_hunk() && !matches!(self.source, Source::Stdin) {
                             self.clear_sel();
                             self.last_click = None;
                             self.expand_here();
@@ -3082,7 +3249,7 @@ impl App {
         match kind {
             RowKind::Add => self.theme.add_line_bg,
             RowKind::Remove => self.theme.remove_line_bg,
-            RowKind::Hunk | RowKind::File => self.theme.header_bg,
+            RowKind::Hunk | RowKind::File | RowKind::Meta | RowKind::CommitLine => self.theme.header_bg,
             RowKind::Context | RowKind::Note => None,
         }
     }
@@ -3145,7 +3312,7 @@ impl App {
             let cbg = is_cursor.then_some(self.theme.cursor_bg);
             let bg = cbg.or(self.row_wash(r.kind));
             match r.kind {
-                RowKind::File | RowKind::Hunk | RowKind::Note => {
+                RowKind::File | RowKind::Hunk | RowKind::Note | RowKind::Meta | RowKind::CommitLine => {
                     self.draw_diff_row(r, x, width, y, bg, Gut::Both);
                     continue;
                 }
@@ -3235,6 +3402,22 @@ impl App {
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.program.screen_mut()
                     .set_str((cx, y), &s, bg(self.theme.header.clone()));
+                return;
+            }
+            RowKind::CommitLine => {
+                // The commit line, always shown and bold like the file header.
+                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
+                self.program.screen_mut()
+                    .set_str((cx, y), &s, bg(self.theme.header.clone().bold()));
+                return;
+            }
+            RowKind::Meta => {
+                // Same color as the diff headers, but not bold. Like the file
+                // and hunk headers, it starts past the gutter (no line numbers
+                // or sign column), not at the far-left edge.
+                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
+                self.program.screen_mut()
+                    .set_str((cx, y), &s, bg(self.theme.meta.clone()));
                 return;
             }
             RowKind::Note => {
@@ -3368,10 +3551,11 @@ fn file_of_row(starts: &[usize], row: usize) -> usize {
     starts.partition_point(|&s| s <= row).saturating_sub(1)
 }
 
-/// Document rows to pin at the top of the body for a given `scroll`: the
-/// enclosing file header and the current hunk header, but only once they've
-/// scrolled strictly above the top content line (so a header still naturally on
-/// screen isn't duplicated). Capped so at least one content row remains.
+/// Document rows to pin at the top of the body for a given `scroll`: the commit
+/// line (for a single commit), the enclosing file header, and the current hunk
+/// header, but only once they've scrolled strictly above the top content line
+/// (so a header still naturally on screen isn't duplicated). Capped so at least
+/// one content row remains.
 fn sticky_at(
     kinds: &[RowKind],
     file_starts: &[usize],
@@ -3382,8 +3566,13 @@ fn sticky_at(
         return Vec::new();
     }
     let mut out = Vec::new();
+    // The commit line pins above the file/hunk headers, so which commit you are
+    // viewing stays visible (and identifiable) while scrolling through its diff.
+    if kinds.first() == Some(&RowKind::CommitLine) {
+        out.push(0);
+    }
     let fi = file_starts.get(file_of_row(file_starts, scroll)).copied().unwrap_or(0);
-    if fi < scroll {
+    if fi < scroll && !out.contains(&fi) {
         out.push(fi);
     }
     // The hunk to pin is the one whose body contains the top line. If the top
@@ -3934,6 +4123,24 @@ mod tests {
         // A cramped body keeps at least one content row (cap = body_h - 1).
         assert_eq!(sticky_at(&kinds, &starts, 6, 2), vec![0]);
         assert_eq!(sticky_at(&kinds, &starts, 6, 1), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn sticky_at_pins_commit_line_above_file_and_hunk() {
+        use super::{sticky_at, RowKind::*};
+        // A single commit: commit line, one detail line and a blank separator,
+        // then the file's header, hunk, and lines.
+        let kinds = [CommitLine, Meta, Meta, File, Hunk, Context, Context, Context];
+        let starts = [3usize];
+        let big = 100;
+        // Scrolled into the diff: the commit line pins first, then the file and
+        // hunk headers.
+        assert_eq!(sticky_at(&kinds, &starts, 6, big), vec![0, 3, 4]);
+        // Scrolled only within the metadata (top line is a detail row): just the
+        // commit line pins; the file header is still below the top.
+        assert_eq!(sticky_at(&kinds, &starts, 2, big), vec![0]);
+        // The cap still leaves a content row.
+        assert_eq!(sticky_at(&kinds, &starts, 6, 2), vec![0]);
     }
 
     #[test]

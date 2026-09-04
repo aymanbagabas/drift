@@ -55,6 +55,12 @@ struct Cli {
     #[arg(long)]
     no_syntax: bool,
 
+    /// Collapse the commit metadata to just the commit line by default (the
+    /// author, date, and message stay hidden until you expand it — `enter` or
+    /// a double-click on the commit line).
+    #[arg(long = "no-commit-meta")]
+    no_commit_meta: bool,
+
     /// Ignore whitespace-only changes (git `-w`).
     #[arg(long = "ignore-whitespace")]
     ignore_whitespace: bool,
@@ -99,6 +105,9 @@ fn run() -> std::io::Result<()> {
     let mut cfg = Config::load(config_path.as_deref());
     if cli.no_syntax {
         cfg.syntax = false;
+    }
+    if cli.no_commit_meta {
+        cfg.commit_meta = false;
     }
 
     // Pager mode: a diff piped on stdin, with no explicit git selection.
