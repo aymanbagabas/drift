@@ -993,17 +993,18 @@ impl App {
         if self.commit_meta.is_empty() {
             return Vec::new();
         }
+        let tab = self.config.tab_width;
         let meta_line = |kind: RowKind, line: &str| {
-            Row::new(
-                kind,
-                None,
-                None,
-                vec![Span {
-                    fg: None,
-                    changed: false,
-                    text: line.to_string(),
-                }],
-            )
+            let mut spans = vec![Span {
+                fg: None,
+                changed: false,
+                text: line.to_string(),
+            }];
+            // Expand tabs like diff content does, so a tab in a commit message
+            // renders and measures correctly instead of writing a raw `\t` that
+            // desyncs the cell/column model.
+            expand_tabs(&mut spans, tab);
+            Row::new(kind, None, None, spans)
         };
         let mut rows = vec![meta_line(RowKind::CommitLine, &self.commit_meta[0])];
         if self.show_meta {
@@ -1886,6 +1887,14 @@ impl App {
 
     /// Open the file (and the cursor line) in the editor.
     fn open_editor(&mut self) -> io::Result<()> {
+        // A commit-metadata row has no file to open; `selected` still points at
+        // file 0, so guard against opening an arbitrary file from the header.
+        if matches!(
+            self.doc_rows.get(self.cursor).map(|r| r.kind),
+            Some(RowKind::CommitLine) | Some(RowKind::Meta)
+        ) {
+            return Ok(());
+        }
         let Some(file) = self.files.get(self.selected) else {
             return Ok(());
         };
@@ -3401,8 +3410,9 @@ impl App {
                 return;
             }
             RowKind::Meta => {
-                // Same color as the diff headers, but not bold, so only the
-                // commit line stands out. Drawn full width (no gutter or sign).
+                // Same color as the diff headers, but not bold. Like the file
+                // and hunk headers, it starts past the gutter (no line numbers
+                // or sign column), not at the far-left edge.
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.program.screen_mut()
                     .set_str((cx, y), &s, bg(self.theme.meta.clone()));
