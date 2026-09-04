@@ -3539,10 +3539,11 @@ fn file_of_row(starts: &[usize], row: usize) -> usize {
     starts.partition_point(|&s| s <= row).saturating_sub(1)
 }
 
-/// Document rows to pin at the top of the body for a given `scroll`: the
-/// enclosing file header and the current hunk header, but only once they've
-/// scrolled strictly above the top content line (so a header still naturally on
-/// screen isn't duplicated). Capped so at least one content row remains.
+/// Document rows to pin at the top of the body for a given `scroll`: the commit
+/// line (for a single commit), the enclosing file header, and the current hunk
+/// header, but only once they've scrolled strictly above the top content line
+/// (so a header still naturally on screen isn't duplicated). Capped so at least
+/// one content row remains.
 fn sticky_at(
     kinds: &[RowKind],
     file_starts: &[usize],
@@ -3553,8 +3554,13 @@ fn sticky_at(
         return Vec::new();
     }
     let mut out = Vec::new();
+    // The commit line pins above the file/hunk headers, so which commit you are
+    // viewing stays visible (and identifiable) while scrolling through its diff.
+    if kinds.first() == Some(&RowKind::CommitLine) {
+        out.push(0);
+    }
     let fi = file_starts.get(file_of_row(file_starts, scroll)).copied().unwrap_or(0);
-    if fi < scroll {
+    if fi < scroll && !out.contains(&fi) {
         out.push(fi);
     }
     // The hunk to pin is the one whose body contains the top line. If the top
@@ -4105,6 +4111,24 @@ mod tests {
         // A cramped body keeps at least one content row (cap = body_h - 1).
         assert_eq!(sticky_at(&kinds, &starts, 6, 2), vec![0]);
         assert_eq!(sticky_at(&kinds, &starts, 6, 1), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn sticky_at_pins_commit_line_above_file_and_hunk() {
+        use super::{sticky_at, RowKind::*};
+        // A single commit: commit line, one detail line and a blank separator,
+        // then the file's header, hunk, and lines.
+        let kinds = [CommitLine, Meta, Meta, File, Hunk, Context, Context, Context];
+        let starts = [3usize];
+        let big = 100;
+        // Scrolled into the diff: the commit line pins first, then the file and
+        // hunk headers.
+        assert_eq!(sticky_at(&kinds, &starts, 6, big), vec![0, 3, 4]);
+        // Scrolled only within the metadata (top line is a detail row): just the
+        // commit line pins; the file header is still below the top.
+        assert_eq!(sticky_at(&kinds, &starts, 2, big), vec![0]);
+        // The cap still leaves a content row.
+        assert_eq!(sticky_at(&kinds, &starts, 6, 2), vec![0]);
     }
 
     #[test]
