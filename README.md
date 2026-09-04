@@ -142,6 +142,7 @@ Some flags worth knowing:
 | `-c`, `--config FILE` | Use a specific config file |
 | `--no-syntax` | Turn off syntax highlighting for this run |
 | `--no-commit-meta` | Collapse the commit metadata to just the commit line |
+| `--wrap` / `--no-wrap` | Wrap long lines instead of scrolling horizontally |
 | `-U`, `--context N` | Lines of context around each change |
 | `--ignore-whitespace` | Ignore whitespace-only changes |
 | `--diff-algorithm ALGO` | `myers`, `minimal`, `patience`, or `histogram` |
@@ -164,6 +165,7 @@ Some flags worth knowing:
 | `/` | Search the current file (regex, smart-case) |
 | `n` `N` | Next / previous match |
 | `s` | Toggle split view |
+| `W` | Toggle line wrapping (long lines wrap instead of scrolling horizontally) |
 | `F` | File list modal |
 | `B` | Toggle the file sidebar |
 | `w` | Toggle watch mode |
@@ -245,6 +247,8 @@ syntax        = true        # highlight diff content
 intraline     = true        # word-level change emphasis
 line-numbers  = true        # old/new line-number gutter
 commit-meta   = true        # expand author/date/message; the commit line always shows for a single commit
+wrap          = false       # wrap long lines instead of scrolling horizontally (toggle with W)
+wrap-symbol   = "↪"         # glyph shown at the start of each wrapped continuation line
 tab-width     = 4
 editor        = ""          # falls back to $VISUAL, then $EDITOR, then vi
 sidebar       = "auto"      # "auto" (opens at width >= 150), "always", or "never"
