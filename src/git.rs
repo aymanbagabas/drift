@@ -193,7 +193,8 @@ impl Source {
                     a.extend(["diff", "--no-color", "--no-ext-diff"].map(String::from));
                 } else {
                     a.extend(
-                        ["show", "--no-color", "--no-ext-diff", "--format=fuller"].map(String::from),
+                        ["show", "--no-color", "--no-ext-diff", "--decorate", "--format=fuller"]
+                            .map(String::from),
                     );
                 }
                 a.extend(opts.flags());
@@ -349,6 +350,8 @@ mod tests {
         let child_diff = diff_of(&child);
         assert!(child_diff.contains("-one"), "child missing removal:\n{child_diff}");
         assert!(child_diff.contains("+two"), "child missing addition:\n{child_diff}");
+        // The commit header carries ref decorations (child is at HEAD).
+        assert!(child_diff.contains("(HEAD"), "child missing ref decoration:\n{child_diff}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
