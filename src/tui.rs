@@ -3839,11 +3839,11 @@ impl App {
             let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
             if seg > 0 {
                 // The wrap glyph is the first char of the continuation line, at
-                // the break-indent, dim in the line-number grey, with a space
-                // after it before the wrapped content resumes.
+                // the break-indent, in the line-number grey, with a space after
+                // it before the wrapped content resumes.
                 let indent = self.wrap_indent_width(r, cw);
                 let sym = self.config.wrap_symbol.clone();
-                let st = bg(self.theme.line_number.clone().faint());
+                let st = bg(self.theme.line_number.clone());
                 self.program.screen_mut().set_str((content_origin + indent, y), &sym, st);
             }
             (col_off, content_origin + draw_indent)
