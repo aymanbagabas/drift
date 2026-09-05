@@ -1691,6 +1691,11 @@ impl App {
     /// currently on screen, minus the visible content width. Recomputed per
     /// scroll tick (bounded by the viewport height, so cheap).
     fn max_hscroll(&self) -> usize {
+        // Wrapping shows the whole line across visual rows, so there is nothing
+        // to scroll horizontally.
+        if self.wrap {
+            return 0;
+        }
         let vh = self.viewport_rows();
         let widest = self
             .rows()
@@ -3697,9 +3702,11 @@ impl App {
         if seg == 0 {
             self.program.screen_mut().set_str((cx, y), sign, bg(sign_style));
         } else {
-            // Continuation segment: the wrap indicator replaces the +/- sign.
+            // Continuation segment: the wrap indicator replaces the +/- sign,
+            // drawn dim in the line-number grey so it stays unobtrusive.
             let sym = self.config.wrap_symbol.clone();
-            self.program.screen_mut().set_str((cx, y), &sym, bg(sign_style));
+            let st = self.theme.line_number.clone().faint();
+            self.program.screen_mut().set_str((cx, y), &sym, bg(st));
         }
         cx += 1;
 
