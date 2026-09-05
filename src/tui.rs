@@ -1424,17 +1424,37 @@ impl App {
     /// Map a screen body-row `y` to the document row drawn there: the sticky
     /// band up top, then linear from `scroll` below it.
     fn screen_y_to_doc(&self, y: u16) -> usize {
+        self.screen_y_to_visual(y).0
+    }
+
+    /// Map a screen body row `y` to the document `(row, visual segment)` drawn
+    /// there. Sticky-band rows are segment 0.
+    fn screen_y_to_visual(&self, y: u16) -> (usize, usize) {
         let sticky = self.sticky_rows();
         let k = sticky.len();
         let last = self.rows().len().saturating_sub(1);
         if (y as usize) < k {
-            return sticky[y as usize];
+            return (sticky[y as usize], 0);
         }
         if self.wrap {
-            let (row, _) = self.vforward(self.scroll, self.scroll_seg, y as usize - k);
-            return row.min(last);
+            return self.vforward(self.scroll, self.scroll_seg, y as usize - k);
         }
-        (self.scroll + (y as usize - k)).min(last)
+        ((self.scroll + (y as usize - k)).min(last), 0)
+    }
+
+    /// Content width available for wrapping inside the selection `pane` (the
+    /// whole body when unified).
+    fn pane_cw(&self, pane: Option<Pane>) -> u16 {
+        let body = self.program.screen().width().saturating_sub(self.sidebar_w());
+        match pane {
+            None => self.wrap_width(body, Gut::Both),
+            Some(Pane::Left) => self.wrap_width(self.split_left_w(body), Gut::Old),
+            Some(Pane::Right) => {
+                let lw = self.split_left_w(body);
+                self.wrap_width(body.saturating_sub(lw + 1), Gut::New)
+            }
+        }
+        .max(1)
     }
 
     /// Rows reserved at the bottom: the footer bar, plus the expanded help
@@ -1869,10 +1889,20 @@ impl App {
         if rows.is_empty() {
             return (0, 0);
         }
-        let row = self.screen_y_to_doc(y);
+        let (row, seg) = self.screen_y_to_visual(y);
         let (origin, cs) = self.pane_geom(rows[row].kind, pane);
         let len = rows[row].content.len();
-        let col = (x.saturating_sub(origin + cs) as usize + self.hscroll).min(len);
+        if !self.wrap {
+            let col = (x.saturating_sub(origin + cs) as usize + self.hscroll).min(len);
+            return (row, col);
+        }
+        // Wrapped: this visual segment shows content columns starting at
+        // `col_off`, drawn at the segment's break-indent offset.
+        let cw = self.pane_cw(pane);
+        let prefix = self.wrap_prefix_width(&rows[row], cw);
+        let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+        let content_start = origin + cs + draw_indent;
+        let col = (col_off as usize + x.saturating_sub(content_start) as usize).min(len);
         (row, col)
     }
 
@@ -2821,7 +2851,42 @@ impl App {
         // Compute the on-screen highlight span for each visible selected row up
         // front, so the immutable row borrow is released before we touch cells.
         let mut segs: Vec<(u16, u16, u16)> = Vec::new();
-        {
+        if self.wrap {
+            // Walk the visible visual lines; a selected row spans several of
+            // them, and the selection's column range maps onto each segment.
+            let rows = self.rows();
+            let er = er.min(rows.len().saturating_sub(1));
+            let cw = self.pane_cw(sel.pane);
+            let body_total = self.body_h_screen() as u16;
+            for y in 0..body_total {
+                let (r, seg) = self.screen_y_to_visual(y);
+                if r < sr || r > er {
+                    continue;
+                }
+                let row = &rows[r];
+                if !App::row_in_pane(row.kind, sel.pane) {
+                    continue;
+                }
+                let (origin, cstart) = self.pane_geom(row.kind, sel.pane);
+                let len = row.content.len() as u16;
+                let start = if r == sr { sc as u16 } else { 0 };
+                let end = if r == er { ec as u16 } else { len };
+                let prefix = self.wrap_prefix_width(row, cw);
+                let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+                let seg_w = if seg == 0 { cw } else { cw.saturating_sub(prefix) };
+                let seg_end = col_off.saturating_add(seg_w);
+                let s = start.max(col_off).min(len);
+                let e = end.min(seg_end).min(len);
+                if e > s {
+                    let content_start = origin + cstart + draw_indent;
+                    let sx = (content_start + (s - col_off)).min(right);
+                    let ex = (content_start + (e - col_off)).min(right);
+                    if ex > sx {
+                        segs.push((y, sx, ex));
+                    }
+                }
+            }
+        } else {
             let rows = self.rows();
             let er = er.min(rows.len().saturating_sub(1));
             for r in sr..=er {
@@ -2885,17 +2950,11 @@ impl App {
         let mut segs: Vec<(u16, u16, u16, bool)> = Vec::new();
         {
             let rows = self.rows();
+            let body_total = self.body_h_screen() as u16;
             for (mi, &(r, cstart, cend)) in self.matches.iter().enumerate() {
                 if r >= rows.len() {
                     continue;
                 }
-                let y = if let Some(p) = sticky.iter().position(|&s| s == r) {
-                    p as u16
-                } else if r >= scroll && r < scroll + body_h {
-                    k + (r - scroll) as u16
-                } else {
-                    continue;
-                };
                 let kind = rows[r].kind;
                 let len = rows[r].content.len() as u16;
                 let cur = self.match_i == Some(mi);
@@ -2905,6 +2964,50 @@ impl App {
                     } else {
                         &[Some(Pane::Left), Some(Pane::Right)]
                     };
+                if self.wrap {
+                    // A match may straddle several wrapped segments; paint the
+                    // slice that falls inside each visible segment of row `r`.
+                    for y in 0..body_total {
+                        let (rr, seg) = self.screen_y_to_visual(y);
+                        if rr != r {
+                            continue;
+                        }
+                        for &pane in panes {
+                            if pane.is_some() && !App::row_in_pane(kind, pane) {
+                                continue;
+                            }
+                            let (origin, cs) = self.pane_geom(kind, pane);
+                            let right = if pane == Some(Pane::Left) {
+                                div.min(body_right)
+                            } else {
+                                body_right
+                            };
+                            let cw = self.pane_cw(pane);
+                            let prefix = self.wrap_prefix_width(&rows[r], cw);
+                            let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+                            let seg_w = if seg == 0 { cw } else { cw.saturating_sub(prefix) };
+                            let seg_end = col_off.saturating_add(seg_w);
+                            let s = (cstart as u16).max(col_off).min(len);
+                            let e = (cend as u16).min(seg_end).min(len);
+                            if e > s {
+                                let content_start = origin + cs + draw_indent;
+                                let sx = (content_start + (s - col_off)).min(right);
+                                let ex = (content_start + (e - col_off)).min(right);
+                                if ex > sx {
+                                    segs.push((y, sx, ex, cur));
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let y = if let Some(p) = sticky.iter().position(|&s| s == r) {
+                    p as u16
+                } else if r >= scroll && r < scroll + body_h {
+                    k + (r - scroll) as u16
+                } else {
+                    continue;
+                };
                 for &pane in panes {
                     if pane.is_some() && !App::row_in_pane(kind, pane) {
                         continue;
