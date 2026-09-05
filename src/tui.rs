@@ -1532,9 +1532,15 @@ impl App {
         self.wrap_width(body, Gut::Both).max(1)
     }
 
+    /// Display width of the wrap glyph (usually 1).
+    fn wrap_glyph_w(&self) -> u16 {
+        self.width(&self.config.wrap_symbol).max(1)
+    }
+
     /// Break-indent width for a row: the display width of its leading spaces,
-    /// capped so a continuation line keeps at least a few content columns. Tabs
-    /// were already expanded to spaces for content rows.
+    /// capped so a continuation line keeps content room after the indent, the
+    /// wrap glyph, and its trailing space. Tabs were already expanded to spaces
+    /// for content rows.
     fn wrap_indent_width(&self, r: &Row, cw: u16) -> u16 {
         let n = r
             .spans
@@ -1542,7 +1548,13 @@ impl App {
             .flat_map(|s| s.text.chars())
             .take_while(|c| *c == ' ')
             .count() as u16;
-        n.min(cw.saturating_sub(4))
+        n.min(cw.saturating_sub(self.wrap_glyph_w() + 5))
+    }
+
+    /// How far a continuation line's content is pushed right: the break-indent,
+    /// then the wrap glyph and one space (which prefix the wrapped content).
+    fn wrap_prefix_width(&self, r: &Row, cw: u16) -> u16 {
+        (self.wrap_indent_width(r, cw) + self.wrap_glyph_w() + 1).min(cw.saturating_sub(1))
     }
 
     /// Visual height (wrapped segments) of a row in the current layout. In split
@@ -1562,8 +1574,8 @@ impl App {
             let right_w = body.saturating_sub(left_w + 1);
             let lcw = self.wrap_width(left_w, Gut::Old).max(1);
             let rcw = self.wrap_width(right_w, Gut::New).max(1);
-            let lsegs = wrap_seg_count(total, lcw, self.wrap_indent_width(r, lcw));
-            let rsegs = wrap_seg_count(total, rcw, self.wrap_indent_width(r, rcw));
+            let lsegs = wrap_seg_count(total, lcw, self.wrap_prefix_width(r, lcw));
+            let rsegs = wrap_seg_count(total, rcw, self.wrap_prefix_width(r, rcw));
             match r.kind {
                 RowKind::Remove => lsegs,
                 RowKind::Add => rsegs,
@@ -1571,7 +1583,7 @@ impl App {
             }
         } else {
             let cw = self.wrap_cw();
-            wrap_seg_count(total, cw, self.wrap_indent_width(r, cw))
+            wrap_seg_count(total, cw, self.wrap_prefix_width(r, cw))
         }
     }
 
@@ -3444,7 +3456,7 @@ impl App {
             return 1;
         }
         let cw = self.wrap_width(pane_w, gut).max(1);
-        wrap_seg_count((r.content.len() as u16).max(1), cw, self.wrap_indent_width(r, cw))
+        wrap_seg_count((r.content.len() as u16).max(1), cw, self.wrap_prefix_width(r, cw))
     }
 
     /// Fill a pane region with the row background (used for the shorter side of
@@ -3701,13 +3713,9 @@ impl App {
         };
         if seg == 0 {
             self.program.screen_mut().set_str((cx, y), sign, bg(sign_style));
-        } else {
-            // Continuation segment: the wrap indicator replaces the +/- sign,
-            // drawn dim in the line-number grey so it stays unobtrusive.
-            let sym = self.config.wrap_symbol.clone();
-            let st = self.theme.line_number.clone().faint();
-            self.program.screen_mut().set_str((cx, y), &sym, bg(st));
         }
+        // Continuation segments leave the sign column blank; the wrap glyph is
+        // drawn as the first indented content char below.
         cx += 1;
 
         let emph_bg = match r.kind {
@@ -3719,12 +3727,22 @@ impl App {
         let content_origin = cx;
         // Wrapping draws segment `seg` by offsetting the content by whole
         // segment widths, reusing the horizontal-scroll machinery. Continuation
-        // segments are also indented to match the line's leading whitespace
-        // (break-indent). Off, it's the live horizontal scroll.
+        // segments are indented to match the line's leading whitespace and
+        // prefixed with the wrap glyph and a space (break-indent). Off, it's the
+        // live horizontal scroll.
         let cw = avail.saturating_sub(content_origin);
         let (hs, content_x0) = if self.wrap {
-            let indent = self.wrap_indent_width(r, cw);
-            let (col_off, draw_indent) = wrap_seg_offset(seg, cw, indent);
+            let prefix = self.wrap_prefix_width(r, cw);
+            let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+            if seg > 0 {
+                // The wrap glyph is the first char of the continuation line, at
+                // the break-indent, dim in the line-number grey, with a space
+                // after it before the wrapped content resumes.
+                let indent = self.wrap_indent_width(r, cw);
+                let sym = self.config.wrap_symbol.clone();
+                let st = bg(self.theme.line_number.clone().faint());
+                self.program.screen_mut().set_str((content_origin + indent, y), &sym, st);
+            }
             (col_off, content_origin + draw_indent)
         } else {
             (self.hscroll as u16, content_origin)
