@@ -2450,11 +2450,26 @@ impl App {
                     self.select_file(-1);
                 } else if k.matches("s") {
                     self.split = !self.split;
+                    if self.wrap {
+                        // Split view changes the wrap widths, so the top row's
+                        // visual height changes too. Clamp the top segment to
+                        // the new layout so the renderer never skips the
+                        // `scroll` row (seg >= row_vheight).
+                        let max_seg = self.vheight(self.scroll).saturating_sub(1);
+                        self.scroll_seg = self.scroll_seg.min(max_seg);
+                        let (r, s) = self.clamp_scroll_pos(self.scroll, self.scroll_seg);
+                        self.scroll = r;
+                        self.scroll_seg = s;
+                    }
                 } else if k.matches("W") {
                     // Toggle line wrapping; horizontal scroll is meaningless
-                    // while wrapping, so reset it.
+                    // while wrapping, so reset it. `scroll_seg` is only valid
+                    // while wrapping, so reset it too: it must be 0 when wrapping
+                    // is off, otherwise the renderer skips the top row once the
+                    // row's visual height collapses back to 1.
                     self.wrap = !self.wrap;
                     self.hscroll = 0;
+                    self.scroll_seg = 0;
                 } else if k.matches("F") {
                     self.view = View::Stat;
                 } else if k.matches("B") {
