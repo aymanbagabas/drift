@@ -762,6 +762,10 @@ pub struct App {
     selected: usize,
     /// Top visible row (viewport offset).
     scroll: usize,
+    /// When wrapping, which visual segment of the top row (`scroll`) sits at the
+    /// very top of the body — so a long wrapped line can be scrolled into.
+    /// Always 0 when wrapping is off.
+    scroll_seg: usize,
     /// Selected/highlighted row within the diff (tig-style cursor line).
     cursor: usize,
     /// Horizontal scroll offset in display columns; the gutter and +/- sign
@@ -782,6 +786,9 @@ pub struct App {
     last_click: Option<(Instant, u16, u16)>,
     /// Side-by-side (split) diff rendering, toggled with `s`.
     split: bool,
+    /// Wrap long lines instead of scrolling horizontally, toggled with `W`.
+    /// Seeded from `config.wrap`.
+    wrap: bool,
     /// Left pane's fraction of the split body (drag the divider to change it).
     split_ratio: f32,
     help_open: bool,
@@ -876,6 +883,7 @@ impl App {
         // so clicks and wheel work immediately (and in non-interactive tests).
         program.enable_mouse(MouseTracking::empty())?;
         let show_meta = config.commit_meta;
+        let wrap = config.wrap;
         let mut app = App {
             program,
             config,
@@ -903,6 +911,7 @@ impl App {
             match_i: None,
             selected: 0,
             scroll: 0,
+            scroll_seg: 0,
             cursor: 0,
             hscroll: 0,
             view: View::Diff,
@@ -912,6 +921,7 @@ impl App {
             resizing_split: false,
             last_click: None,
             split: false,
+            wrap,
             split_ratio: 0.5,
             help_open: false,
             help_badge_x: 0,
@@ -941,6 +951,7 @@ impl App {
         self.selected = 0;
         self.cursor = 0;
         self.scroll = 0;
+        self.scroll_seg = 0;
         self.doc_rows.clear();
         self.file_starts.clear();
         self.commit_meta.clear();
@@ -1413,14 +1424,37 @@ impl App {
     /// Map a screen body-row `y` to the document row drawn there: the sticky
     /// band up top, then linear from `scroll` below it.
     fn screen_y_to_doc(&self, y: u16) -> usize {
+        self.screen_y_to_visual(y).0
+    }
+
+    /// Map a screen body row `y` to the document `(row, visual segment)` drawn
+    /// there. Sticky-band rows are segment 0.
+    fn screen_y_to_visual(&self, y: u16) -> (usize, usize) {
         let sticky = self.sticky_rows();
         let k = sticky.len();
         let last = self.rows().len().saturating_sub(1);
         if (y as usize) < k {
-            sticky[y as usize]
-        } else {
-            (self.scroll + (y as usize - k)).min(last)
+            return (sticky[y as usize], 0);
         }
+        if self.wrap {
+            return self.vforward(self.scroll, self.scroll_seg, y as usize - k);
+        }
+        ((self.scroll + (y as usize - k)).min(last), 0)
+    }
+
+    /// Content width available for wrapping inside the selection `pane` (the
+    /// whole body when unified).
+    fn pane_cw(&self, pane: Option<Pane>) -> u16 {
+        let body = self.program.screen().width().saturating_sub(self.sidebar_w());
+        match pane {
+            None => self.wrap_width(body, Gut::Both),
+            Some(Pane::Left) => self.wrap_width(self.split_left_w(body), Gut::Old),
+            Some(Pane::Right) => {
+                let lw = self.split_left_w(body);
+                self.wrap_width(body.saturating_sub(lw + 1), Gut::New)
+            }
+        }
+        .max(1)
     }
 
     /// Rows reserved at the bottom: the footer bar, plus the expanded help
@@ -1453,6 +1487,7 @@ impl App {
             ("/", "search"),
             ("n/N", "next/prev match"),
             ("s", "split view"),
+            ("W", "wrap lines"),
             ("F", "files"),
             ("B", "sidebar"),
             ("w", "watch on/off"),
@@ -1507,7 +1542,143 @@ impl App {
 
     /// Scroll the viewport by `delta` rows without moving the cursor, clamped to
     /// the content. Used by drag-select to auto-scroll past the visible edge.
+    /// Content width used to wrap the body in the current unified layout, or
+    /// `u16::MAX` when wrapping is off (every row is then one visual line).
+    fn wrap_cw(&self) -> u16 {
+        if !self.wrap {
+            return u16::MAX;
+        }
+        let body = self.program.screen().width().saturating_sub(self.sidebar_w());
+        self.wrap_width(body, Gut::Both).max(1)
+    }
+
+    /// Display width of the wrap glyph (usually 1).
+    fn wrap_glyph_w(&self) -> u16 {
+        self.width(&self.config.wrap_symbol).max(1)
+    }
+
+    /// Break-indent width for a row: the display width of its leading spaces,
+    /// capped so a continuation line keeps content room after the indent, the
+    /// wrap glyph, and its trailing space. Tabs were already expanded to spaces
+    /// for content rows.
+    fn wrap_indent_width(&self, r: &Row, cw: u16) -> u16 {
+        let n = r
+            .spans
+            .iter()
+            .flat_map(|s| s.text.chars())
+            .take_while(|c| *c == ' ')
+            .count() as u16;
+        n.min(cw.saturating_sub(self.wrap_glyph_w() + 5))
+    }
+
+    /// How far a continuation line's content is pushed right: the break-indent,
+    /// then the wrap glyph and one space (which prefix the wrapped content).
+    fn wrap_prefix_width(&self, r: &Row, cw: u16) -> u16 {
+        (self.wrap_indent_width(r, cw) + self.wrap_glyph_w() + 1).min(cw.saturating_sub(1))
+    }
+
+    /// Visual height (wrapped segments) of a row in the current layout. In split
+    /// view a content row wraps in each pane at that pane's width, and the two
+    /// panes must advance in lockstep, so the height is the larger of the two.
+    fn row_vheight(&self, r: &Row) -> usize {
+        if !self.wrap {
+            return 1;
+        }
+        if !matches!(r.kind, RowKind::Add | RowKind::Remove | RowKind::Context) {
+            return 1;
+        }
+        let total = (r.content.len() as u16).max(1);
+        if self.split {
+            let body = self.program.screen().width().saturating_sub(self.sidebar_w());
+            let left_w = self.split_left_w(body);
+            let right_w = body.saturating_sub(left_w + 1);
+            let lcw = self.wrap_width(left_w, Gut::Old).max(1);
+            let rcw = self.wrap_width(right_w, Gut::New).max(1);
+            let lsegs = wrap_seg_count(total, lcw, self.wrap_prefix_width(r, lcw));
+            let rsegs = wrap_seg_count(total, rcw, self.wrap_prefix_width(r, rcw));
+            match r.kind {
+                RowKind::Remove => lsegs,
+                RowKind::Add => rsegs,
+                _ => lsegs.max(rsegs),
+            }
+        } else {
+            let cw = self.wrap_cw();
+            wrap_seg_count(total, cw, self.wrap_prefix_width(r, cw))
+        }
+    }
+
+    /// Visual height of doc row `i` (1 past the end).
+    fn vheight(&self, i: usize) -> usize {
+        self.doc_rows.get(i).map(|r| self.row_vheight(r)).unwrap_or(1)
+    }
+
+    /// Advance a visual position `(row, seg)` forward by `n` visual lines,
+    /// stopping at the last line of the document.
+    fn vforward(&self, mut row: usize, mut seg: usize, mut n: usize) -> (usize, usize) {
+        let last = self.doc_rows.len().saturating_sub(1);
+        while n > 0 {
+            let h = self.vheight(row);
+            if seg + 1 < h {
+                seg += 1;
+            } else if row < last {
+                row += 1;
+                seg = 0;
+            } else {
+                break;
+            }
+            n -= 1;
+        }
+        (row, seg)
+    }
+
+    /// Move a visual position `(row, seg)` back by `n` visual lines, stopping at
+    /// the top of the document.
+    fn vback(&self, mut row: usize, mut seg: usize, mut n: usize) -> (usize, usize) {
+        while n > 0 {
+            if seg > 0 {
+                seg -= 1;
+            } else if row > 0 {
+                row -= 1;
+                seg = self.vheight(row).saturating_sub(1);
+            } else {
+                break;
+            }
+            n -= 1;
+        }
+        (row, seg)
+    }
+
+    /// The furthest-down top position: the last visual line minus `vh - 1`, so
+    /// the final line rests at the bottom of the body.
+    fn max_scroll_pos(&self) -> (usize, usize) {
+        let last = self.doc_rows.len().saturating_sub(1);
+        let last_seg = self.vheight(last).saturating_sub(1);
+        let vh = self.viewport_rows().max(1);
+        self.vback(last, last_seg, vh - 1)
+    }
+
+    /// Clamp a visual position to `[(0,0), max_scroll_pos]`.
+    fn clamp_scroll_pos(&self, row: usize, seg: usize) -> (usize, usize) {
+        let (mr, ms) = self.max_scroll_pos();
+        if row > mr || (row == mr && seg > ms) {
+            (mr, ms)
+        } else {
+            (row, seg)
+        }
+    }
+
     fn scroll_by(&mut self, delta: isize) {
+        if self.wrap {
+            let (r, s) = if delta >= 0 {
+                self.vforward(self.scroll, self.scroll_seg, delta as usize)
+            } else {
+                self.vback(self.scroll, self.scroll_seg, (-delta) as usize)
+            };
+            let (r, s) = self.clamp_scroll_pos(r, s);
+            self.scroll = r;
+            self.scroll_seg = s;
+            return;
+        }
         let max = self.max_scroll() as isize;
         self.scroll = (self.scroll as isize + delta).clamp(0, max) as usize;
     }
@@ -1520,10 +1691,14 @@ impl App {
             return;
         }
         self.scroll_by(delta);
-        let vh = self.viewport_rows();
+        let vh = self.viewport_rows().max(1);
         let last = self.rows().len() - 1;
-        let bottom = (self.scroll + vh).saturating_sub(1).min(last);
-        self.cursor = self.cursor.clamp(self.scroll, bottom);
+        let bottom = if self.wrap {
+            self.vforward(self.scroll, self.scroll_seg, vh - 1).0
+        } else {
+            (self.scroll + vh).saturating_sub(1).min(last)
+        };
+        self.cursor = self.cursor.clamp(self.scroll, bottom.min(last));
         self.selected = self.file_at(self.cursor);
     }
 
@@ -1548,6 +1723,11 @@ impl App {
     /// currently on screen, minus the visible content width. Recomputed per
     /// scroll tick (bounded by the viewport height, so cheap).
     fn max_hscroll(&self) -> usize {
+        // Wrapping shows the whole line across visual rows, so there is nothing
+        // to scroll horizontally.
+        if self.wrap {
+            return 0;
+        }
         let vh = self.viewport_rows();
         let widest = self
             .rows()
@@ -1709,10 +1889,20 @@ impl App {
         if rows.is_empty() {
             return (0, 0);
         }
-        let row = self.screen_y_to_doc(y);
+        let (row, seg) = self.screen_y_to_visual(y);
         let (origin, cs) = self.pane_geom(rows[row].kind, pane);
         let len = rows[row].content.len();
-        let col = (x.saturating_sub(origin + cs) as usize + self.hscroll).min(len);
+        if !self.wrap {
+            let col = (x.saturating_sub(origin + cs) as usize + self.hscroll).min(len);
+            return (row, col);
+        }
+        // Wrapped: this visual segment shows content columns starting at
+        // `col_off`, drawn at the segment's break-indent offset.
+        let cw = self.pane_cw(pane);
+        let prefix = self.wrap_prefix_width(&rows[row], cw);
+        let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+        let content_start = origin + cs + draw_indent;
+        let col = (col_off as usize + x.saturating_sub(content_start) as usize).min(len);
         (row, col)
     }
 
@@ -1772,7 +1962,29 @@ impl App {
         }
         let last = self.rows().len() - 1;
         self.cursor = (self.cursor as isize + delta).clamp(0, last as isize) as usize;
-        let vh = self.viewport_rows();
+        let vh = self.viewport_rows().max(1);
+        if self.wrap {
+            if self.cursor < self.scroll {
+                // Cursor above the top: snap the top to its first visual line.
+                self.scroll = self.cursor;
+                self.scroll_seg = 0;
+            } else {
+                // Keep the cursor's last visual line on screen: the lowest top
+                // that still shows it is `vback(cursor_last, vh - 1)`. Only move
+                // the top down, never up.
+                let clast = self.vheight(self.cursor).saturating_sub(1);
+                let (nr, ns) = self.vback(self.cursor, clast, vh - 1);
+                if nr > self.scroll || (nr == self.scroll && ns > self.scroll_seg) {
+                    self.scroll = nr;
+                    self.scroll_seg = ns;
+                }
+            }
+            let (r, s) = self.clamp_scroll_pos(self.scroll, self.scroll_seg);
+            self.scroll = r;
+            self.scroll_seg = s;
+            self.selected = self.file_at(self.cursor);
+            return;
+        }
         if self.cursor < self.scroll {
             self.scroll = self.cursor;
         } else if self.cursor >= self.scroll + vh {
@@ -1786,6 +1998,7 @@ impl App {
     fn cursor_to(&mut self, idx: usize) {
         self.cursor = 0;
         self.scroll = 0;
+        self.scroll_seg = 0;
         self.move_cursor(idx as isize);
     }
 
@@ -2237,6 +2450,26 @@ impl App {
                     self.select_file(-1);
                 } else if k.matches("s") {
                     self.split = !self.split;
+                    if self.wrap {
+                        // Split view changes the wrap widths, so the top row's
+                        // visual height changes too. Clamp the top segment to
+                        // the new layout so the renderer never skips the
+                        // `scroll` row (seg >= row_vheight).
+                        let max_seg = self.vheight(self.scroll).saturating_sub(1);
+                        self.scroll_seg = self.scroll_seg.min(max_seg);
+                        let (r, s) = self.clamp_scroll_pos(self.scroll, self.scroll_seg);
+                        self.scroll = r;
+                        self.scroll_seg = s;
+                    }
+                } else if k.matches("W") {
+                    // Toggle line wrapping; horizontal scroll is meaningless
+                    // while wrapping, so reset it. `scroll_seg` is only valid
+                    // while wrapping, so reset it too: it must be 0 when wrapping
+                    // is off, otherwise the renderer skips the top row once the
+                    // row's visual height collapses back to 1.
+                    self.wrap = !self.wrap;
+                    self.hscroll = 0;
+                    self.scroll_seg = 0;
                 } else if k.matches("F") {
                     self.view = View::Stat;
                 } else if k.matches("B") {
@@ -2633,7 +2866,42 @@ impl App {
         // Compute the on-screen highlight span for each visible selected row up
         // front, so the immutable row borrow is released before we touch cells.
         let mut segs: Vec<(u16, u16, u16)> = Vec::new();
-        {
+        if self.wrap {
+            // Walk the visible visual lines; a selected row spans several of
+            // them, and the selection's column range maps onto each segment.
+            let rows = self.rows();
+            let er = er.min(rows.len().saturating_sub(1));
+            let cw = self.pane_cw(sel.pane);
+            let body_total = self.body_h_screen() as u16;
+            for y in 0..body_total {
+                let (r, seg) = self.screen_y_to_visual(y);
+                if r < sr || r > er {
+                    continue;
+                }
+                let row = &rows[r];
+                if !App::row_in_pane(row.kind, sel.pane) {
+                    continue;
+                }
+                let (origin, cstart) = self.pane_geom(row.kind, sel.pane);
+                let len = row.content.len() as u16;
+                let start = if r == sr { sc as u16 } else { 0 };
+                let end = if r == er { ec as u16 } else { len };
+                let prefix = self.wrap_prefix_width(row, cw);
+                let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+                let seg_w = if seg == 0 { cw } else { cw.saturating_sub(prefix) };
+                let seg_end = col_off.saturating_add(seg_w);
+                let s = start.max(col_off).min(len);
+                let e = end.min(seg_end).min(len);
+                if e > s {
+                    let content_start = origin + cstart + draw_indent;
+                    let sx = (content_start + (s - col_off)).min(right);
+                    let ex = (content_start + (e - col_off)).min(right);
+                    if ex > sx {
+                        segs.push((y, sx, ex));
+                    }
+                }
+            }
+        } else {
             let rows = self.rows();
             let er = er.min(rows.len().saturating_sub(1));
             for r in sr..=er {
@@ -2697,17 +2965,11 @@ impl App {
         let mut segs: Vec<(u16, u16, u16, bool)> = Vec::new();
         {
             let rows = self.rows();
+            let body_total = self.body_h_screen() as u16;
             for (mi, &(r, cstart, cend)) in self.matches.iter().enumerate() {
                 if r >= rows.len() {
                     continue;
                 }
-                let y = if let Some(p) = sticky.iter().position(|&s| s == r) {
-                    p as u16
-                } else if r >= scroll && r < scroll + body_h {
-                    k + (r - scroll) as u16
-                } else {
-                    continue;
-                };
                 let kind = rows[r].kind;
                 let len = rows[r].content.len() as u16;
                 let cur = self.match_i == Some(mi);
@@ -2717,6 +2979,50 @@ impl App {
                     } else {
                         &[Some(Pane::Left), Some(Pane::Right)]
                     };
+                if self.wrap {
+                    // A match may straddle several wrapped segments; paint the
+                    // slice that falls inside each visible segment of row `r`.
+                    for y in 0..body_total {
+                        let (rr, seg) = self.screen_y_to_visual(y);
+                        if rr != r {
+                            continue;
+                        }
+                        for &pane in panes {
+                            if pane.is_some() && !App::row_in_pane(kind, pane) {
+                                continue;
+                            }
+                            let (origin, cs) = self.pane_geom(kind, pane);
+                            let right = if pane == Some(Pane::Left) {
+                                div.min(body_right)
+                            } else {
+                                body_right
+                            };
+                            let cw = self.pane_cw(pane);
+                            let prefix = self.wrap_prefix_width(&rows[r], cw);
+                            let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+                            let seg_w = if seg == 0 { cw } else { cw.saturating_sub(prefix) };
+                            let seg_end = col_off.saturating_add(seg_w);
+                            let s = (cstart as u16).max(col_off).min(len);
+                            let e = (cend as u16).min(seg_end).min(len);
+                            if e > s {
+                                let content_start = origin + cs + draw_indent;
+                                let sx = (content_start + (s - col_off)).min(right);
+                                let ex = (content_start + (e - col_off)).min(right);
+                                if ex > sx {
+                                    segs.push((y, sx, ex, cur));
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let y = if let Some(p) = sticky.iter().position(|&s| s == r) {
+                    p as u16
+                } else if r >= scroll && r < scroll + body_h {
+                    k + (r - scroll) as u16
+                } else {
+                    continue;
+                };
                 for &pane in panes {
                     if pane.is_some() && !App::row_in_pane(kind, pane) {
                         continue;
@@ -3254,6 +3560,33 @@ impl App {
         }
     }
 
+    /// The wrappable content width for a content row drawn in `width` cells with
+    /// gutter mode `gut`: what's left past the line-number gutter and the +/-
+    /// sign column.
+    fn wrap_width(&self, width: u16, gut: Gut) -> u16 {
+        width.saturating_sub(self.gutter_w(gut) + 1)
+    }
+
+    /// Visual segments a content row occupies inside a single pane of width
+    /// `pane_w` with gutter mode `gut` (1 when wrapping is off).
+    fn pane_segs(&self, r: &Row, pane_w: u16, gut: Gut) -> usize {
+        if !self.wrap {
+            return 1;
+        }
+        let cw = self.wrap_width(pane_w, gut).max(1);
+        wrap_seg_count((r.content.len() as u16).max(1), cw, self.wrap_prefix_width(r, cw))
+    }
+
+    /// Fill a pane region with the row background (used for the shorter side of
+    /// a wrapped context row, past its last segment).
+    fn fill_blank(&mut self, x: u16, width: u16, y: u16, bg: Option<Color>) {
+        if width == 0 {
+            return;
+        }
+        let st = bg.map(|c| Style::default().bg(c)).unwrap_or_default();
+        self.program.screen_mut().set_str((x, y), &" ".repeat(width as usize), st);
+    }
+
     fn render_diff(&mut self, x: u16, width: u16, body_h: u16) {
         // The sticky band pins the enclosing file/hunk headers to the top; the
         // scrolled content follows below it.
@@ -3261,24 +3594,41 @@ impl App {
         // Move the document rows out so we can freely borrow `self.screen`
         // while iterating; restored right after rendering.
         let rows = std::mem::take(&mut self.doc_rows);
-        for row in 0..body_h {
-            let idx = if (row as usize) < sticky.len() {
-                sticky[row as usize]
-            } else {
-                self.scroll + (row as usize - sticky.len())
-            };
+        let mut y: u16 = 0;
+        // Sticky band: one line per pinned header (seg 0, truncated).
+        for &idx in sticky.iter() {
+            if y >= body_h {
+                break;
+            }
             let Some(r) = rows.get(idx) else {
                 break;
             };
-            let y = row;
-            let is_cursor = idx == self.cursor && self.view == View::Diff;
-            // Whole-line background: the cursor wins, otherwise the kind's wash.
+            let row_bg = self.row_wash(r.kind);
+            self.draw_diff_row(r, x, width, y, row_bg, Gut::Both, 0);
+            y += 1;
+        }
+        // Scrolled content, wrapped, starting at (scroll, scroll_seg).
+        let mut row = self.scroll;
+        let mut seg = self.scroll_seg;
+        while y < body_h {
+            let Some(r) = rows.get(row) else {
+                break;
+            };
+            let h = self.row_vheight(r);
+            if seg >= h {
+                row += 1;
+                seg = 0;
+                continue;
+            }
+            let is_cursor = row == self.cursor && self.view == View::Diff;
             let row_bg = if is_cursor {
                 Some(self.theme.cursor_bg)
             } else {
                 self.row_wash(r.kind)
             };
-            self.draw_diff_row(r, x, width, y, row_bg, Gut::Both);
+            self.draw_diff_row(r, x, width, y, row_bg, Gut::Both, seg);
+            y += 1;
+            seg += 1;
         }
         // Restore the rows we borrowed.
         self.doc_rows = rows;
@@ -3297,45 +3647,93 @@ impl App {
         let right_w = width - left_w - 1;
         let sticky = self.sticky_rows();
         let rows = std::mem::take(&mut self.doc_rows);
-        for row in 0..body_h {
-            let idx = if (row as usize) < sticky.len() {
-                sticky[row as usize]
-            } else {
-                self.scroll + (row as usize - sticky.len())
-            };
+        let mut y: u16 = 0;
+        // Sticky band: one line per pinned header (seg 0, truncated).
+        for &idx in sticky.iter() {
+            if y >= body_h {
+                break;
+            }
             let Some(r) = rows.get(idx) else {
                 break;
             };
-            let y = row;
-            let is_cursor = idx == self.cursor && self.view == View::Diff;
-            // Cursor highlight (whole row), and the row's own wash under it.
-            let cbg = is_cursor.then_some(self.theme.cursor_bg);
-            let bg = cbg.or(self.row_wash(r.kind));
-            match r.kind {
-                RowKind::File | RowKind::Hunk | RowKind::Note | RowKind::Meta | RowKind::CommitLine => {
-                    self.draw_diff_row(r, x, width, y, bg, Gut::Both);
-                    continue;
-                }
-                RowKind::Context => {
-                    self.draw_diff_row(r, x, left_w, y, bg, Gut::Old);
-                    self.draw_diff_row(r, right_x, right_w, y, bg, Gut::New);
-                }
-                RowKind::Remove => {
-                    self.draw_diff_row(r, x, left_w, y, bg, Gut::Old);
-                    self.fill_slash(right_x, right_w, y, cbg);
-                }
-                RowKind::Add => {
-                    self.fill_slash(x, left_w, y, cbg);
-                    self.draw_diff_row(r, right_x, right_w, y, bg, Gut::New);
-                }
+            self.draw_split_row(r, x, left_w, div_x, right_x, right_w, y, 0, false);
+            y += 1;
+        }
+        // Scrolled content, wrapped, starting at (scroll, scroll_seg).
+        let mut row = self.scroll;
+        let mut seg = self.scroll_seg;
+        while y < body_h {
+            let Some(r) = rows.get(row) else {
+                break;
+            };
+            let h = self.row_vheight(r);
+            if seg >= h {
+                row += 1;
+                seg = 0;
+                continue;
             }
-            let mut dv = self.theme.sidebar_border.clone();
-            if let Some(c) = cbg {
-                dv = dv.bg(c);
-            }
-            self.program.screen_mut().set_str((div_x, y), "│", dv);
+            let is_cursor = row == self.cursor && self.view == View::Diff;
+            self.draw_split_row(r, x, left_w, div_x, right_x, right_w, y, seg, is_cursor);
+            y += 1;
+            seg += 1;
         }
         self.doc_rows = rows;
+    }
+
+    /// Draw visual segment `seg` of a row across the two split panes at screen
+    /// row `y`. Headers span the full width (seg 0 only); a content row draws
+    /// its old side left and new side right, hatching the side it doesn't touch
+    /// and blanking the shorter side once it runs out of wrapped segments.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_split_row(
+        &mut self,
+        r: &Row,
+        x: u16,
+        left_w: u16,
+        div_x: u16,
+        right_x: u16,
+        right_w: u16,
+        y: u16,
+        seg: usize,
+        is_cursor: bool,
+    ) {
+        let cbg = is_cursor.then_some(self.theme.cursor_bg);
+        let bg = cbg.or(self.row_wash(r.kind));
+        match r.kind {
+            RowKind::File | RowKind::Hunk | RowKind::Note | RowKind::Meta | RowKind::CommitLine => {
+                // A header spans the whole width; it never wraps here.
+                let full = right_x + right_w - x;
+                self.draw_diff_row(r, x, full, y, bg, Gut::Both, 0);
+                return;
+            }
+            RowKind::Context => {
+                let lsegs = self.pane_segs(r, left_w, Gut::Old);
+                let rsegs = self.pane_segs(r, right_w, Gut::New);
+                if seg < lsegs {
+                    self.draw_diff_row(r, x, left_w, y, bg, Gut::Old, seg);
+                } else {
+                    self.fill_blank(x, left_w, y, bg);
+                }
+                if seg < rsegs {
+                    self.draw_diff_row(r, right_x, right_w, y, bg, Gut::New, seg);
+                } else {
+                    self.fill_blank(right_x, right_w, y, bg);
+                }
+            }
+            RowKind::Remove => {
+                self.draw_diff_row(r, x, left_w, y, bg, Gut::Old, seg);
+                self.fill_slash(right_x, right_w, y, cbg);
+            }
+            RowKind::Add => {
+                self.fill_slash(x, left_w, y, cbg);
+                self.draw_diff_row(r, right_x, right_w, y, bg, Gut::New, seg);
+            }
+        }
+        let mut dv = self.theme.sidebar_border.clone();
+        if let Some(c) = cbg {
+            dv = dv.bg(c);
+        }
+        self.program.screen_mut().set_str((div_x, y), "│", dv);
     }
 
     /// Hatch an empty pane half with diagonal slashes (used where a split-view
@@ -3352,9 +3750,13 @@ impl App {
             .set_str((x, y), &"╱".repeat(width as usize), st);
     }
 
-    /// Draw a single diff row into the box `[x, x+width)` at screen row `y`,
-    /// with an optional whole-row background wash and a gutter mode.
-    fn draw_diff_row(&mut self, r: &Row, x: u16, width: u16, y: u16, row_bg: Option<Color>, gut: Gut) {
+    /// Draw a single visual segment `seg` of a diff row into the box
+    /// `[x, x+width)` at screen row `y`. With wrapping off, `seg` is always 0
+    /// and this draws the whole (horizontally scrolled) line. With wrapping on,
+    /// segment `seg` shows content columns `[seg*cw, (seg+1)*cw)` — the same
+    /// machinery as horizontal scroll, offset by whole segments.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_diff_row(&mut self, r: &Row, x: u16, width: u16, y: u16, row_bg: Option<Color>, gut: Gut, seg: usize) {
         if width == 0 {
             return;
         }
@@ -3373,8 +3775,8 @@ impl App {
         };
         let mut cx = x;
 
-        // Gutter: line numbers.
-        if self.config.line_numbers && matches!(r.kind, RowKind::Add | RowKind::Remove | RowKind::Context) {
+        // Gutter: line numbers, only on the first visual segment.
+        if seg == 0 && self.config.line_numbers && matches!(r.kind, RowKind::Add | RowKind::Remove | RowKind::Context) {
             let onum = r.old_no.map(|n| n.to_string()).unwrap_or_default();
             let nnum = r.new_no.map(|n| n.to_string()).unwrap_or_default();
             let gutter = match gut {
@@ -3427,7 +3829,11 @@ impl App {
                 return;
             }
         };
-        self.program.screen_mut().set_str((cx, y), sign, bg(sign_style));
+        if seg == 0 {
+            self.program.screen_mut().set_str((cx, y), sign, bg(sign_style));
+        }
+        // Continuation segments leave the sign column blank; the wrap glyph is
+        // drawn as the first indented content char below.
         cx += 1;
 
         let emph_bg = match r.kind {
@@ -3436,8 +3842,29 @@ impl App {
             _ => None,
         };
         let avail = x + width;
-        let content_x0 = cx;
-        let hs = self.hscroll as u16;
+        let content_origin = cx;
+        // Wrapping draws segment `seg` by offsetting the content by whole
+        // segment widths, reusing the horizontal-scroll machinery. Continuation
+        // segments are indented to match the line's leading whitespace and
+        // prefixed with the wrap glyph and a space (break-indent). Off, it's the
+        // live horizontal scroll.
+        let cw = avail.saturating_sub(content_origin);
+        let (hs, content_x0) = if self.wrap {
+            let prefix = self.wrap_prefix_width(r, cw);
+            let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+            if seg > 0 {
+                // The wrap glyph is the first char of the continuation line, at
+                // the break-indent, in the line-number grey, with a space after
+                // it before the wrapped content resumes.
+                let indent = self.wrap_indent_width(r, cw);
+                let sym = self.config.wrap_symbol.clone();
+                let st = bg(self.theme.line_number.clone());
+                self.program.screen_mut().set_str((content_origin + indent, y), &sym, st);
+            }
+            (col_off, content_origin + draw_indent)
+        } else {
+            (self.hscroll as u16, content_origin)
+        };
         // Content column where the current span begins. The gutter and sign are
         // pinned; only the spans past `content_x0` shift left by `hscroll`.
         let mut vcol: u16 = 0;
@@ -3549,6 +3976,29 @@ fn base_fg(style: &Style) -> Option<Color> {
 /// Rows before the first start (there are none in practice) map to file 0.
 fn file_of_row(starts: &[usize], row: usize) -> usize {
     starts.partition_point(|&s| s <= row).saturating_sub(1)
+}
+
+/// Number of visual segments for `total` content columns wrapped to width `cw`,
+/// where continuation lines are indented by `indent` (break-indent), so they
+/// hold `cw - indent` columns each. The first line always holds `cw`.
+fn wrap_seg_count(total: u16, cw: u16, indent: u16) -> usize {
+    if cw == 0 || total <= cw {
+        return 1;
+    }
+    let cont = cw.saturating_sub(indent).max(1);
+    1 + (total - cw).div_ceil(cont) as usize
+}
+
+/// For visual segment `seg`, the `(content_column_offset, draw_indent)`: the
+/// first column of content the segment shows, and how far past the content
+/// origin it is drawn. Segment 0 starts at column 0 with no indent; each
+/// continuation starts after the first `cw` columns and is indented.
+fn wrap_seg_offset(seg: usize, cw: u16, indent: u16) -> (u16, u16) {
+    if seg == 0 {
+        return (0, 0);
+    }
+    let cont = cw.saturating_sub(indent).max(1);
+    (cw + (seg as u16 - 1) * cont, indent)
 }
 
 /// Document rows to pin at the top of the body for a given `scroll`: the commit
@@ -4123,6 +4573,37 @@ mod tests {
         // A cramped body keeps at least one content row (cap = body_h - 1).
         assert_eq!(sticky_at(&kinds, &starts, 6, 2), vec![0]);
         assert_eq!(sticky_at(&kinds, &starts, 6, 1), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn wrap_seg_count_counts_visual_lines() {
+        use super::wrap_seg_count;
+        // Fits: one line.
+        assert_eq!(wrap_seg_count(10, 20, 0), 1);
+        assert_eq!(wrap_seg_count(20, 20, 0), 1);
+        // No indent: ceil over the width, plus nothing special.
+        assert_eq!(wrap_seg_count(21, 20, 0), 2);
+        assert_eq!(wrap_seg_count(40, 20, 0), 2);
+        assert_eq!(wrap_seg_count(41, 20, 0), 3);
+        // With break-indent, continuation lines hold `cw - indent` columns.
+        // First line takes 20; the remaining 20 wrap at 16 -> 2 more lines.
+        assert_eq!(wrap_seg_count(40, 20, 4), 3);
+        // Degenerate width never divides by zero.
+        assert_eq!(wrap_seg_count(100, 0, 0), 1);
+    }
+
+    #[test]
+    fn wrap_seg_offset_places_segments() {
+        use super::wrap_seg_offset;
+        // First segment: whole width from column 0, no indent.
+        assert_eq!(wrap_seg_offset(0, 20, 4), (0, 0));
+        // Continuations start after the first `cw` columns, then advance by
+        // `cw - indent`, and are drawn indented.
+        assert_eq!(wrap_seg_offset(1, 20, 4), (20, 4));
+        assert_eq!(wrap_seg_offset(2, 20, 4), (36, 4));
+        // No indent: uniform `cw` steps, like plain segment offsets.
+        assert_eq!(wrap_seg_offset(1, 20, 0), (20, 0));
+        assert_eq!(wrap_seg_offset(2, 20, 0), (40, 0));
     }
 
     #[test]
