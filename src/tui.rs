@@ -758,9 +758,11 @@ pub struct App {
     /// `match_i` is the current hit for `n`/`N` navigation and highlighting.
     query: String,
     input: Option<String>,
-    /// (cursor, scroll, query) snapshot taken when the `/` prompt opens, so Esc
-    /// restores the pre-search view (Neovim incsearch behaviour).
-    search_return: Option<(usize, usize, String)>,
+    /// (cursor, scroll, scroll_seg, query) snapshot taken when the `/` prompt
+    /// opens, so Esc restores the pre-search view (Neovim incsearch behaviour).
+    /// `scroll_seg` is included so a search started while scrolled into a
+    /// wrapped continuation segment restores the exact visual top.
+    search_return: Option<(usize, usize, usize, String)>,
     matches: Vec<(usize, usize, usize)>,
     match_i: Option<usize>,
     selected: usize,
@@ -2287,10 +2289,11 @@ impl App {
                 if let Some(mut buf) = self.input.take() {
                     if k.matches("escape") {
                         // restore pre-search view
-                        if let Some((cur, scr, q)) = self.search_return.take() {
+                        if let Some((cur, scr, seg, q)) = self.search_return.take() {
                             self.query = q;
                             self.cursor = cur;
                             self.scroll = scr;
+                            self.scroll_seg = seg;
                             self.refresh_search();
                         }
                     } else if k.matches("enter") {
@@ -2309,9 +2312,10 @@ impl App {
                         // relative to where the search started.
                         self.input = Some(buf.clone());
                         self.query = buf;
-                        if let Some((cur, scr, _)) = self.search_return {
+                        if let Some((cur, scr, seg, _)) = self.search_return {
                             self.cursor = cur;
                             self.scroll = scr;
+                            self.scroll_seg = seg;
                         }
                         if self.query.is_empty() {
                             self.matches.clear();
@@ -2445,7 +2449,7 @@ impl App {
                 } else if k.matches_any(["{", "("]) {
                     self.jump_hunk(-1);
                 } else if k.matches("/") {
-                    self.search_return = Some((self.cursor, self.scroll, self.query.clone()));
+                    self.search_return = Some((self.cursor, self.scroll, self.scroll_seg, self.query.clone()));
                     self.input = Some(String::new());
                 } else if k.matches("n") {
                     self.step_match(1);
