@@ -3564,21 +3564,19 @@ fn abbrev_home(path: &Path) -> String {
 }
 
 fn abbrev_with_home(path: &Path, home: Option<&Path>) -> String {
-    let s = path.to_string_lossy();
     if let Some(home) = home {
-        let home = home.to_string_lossy();
-        if !home.is_empty() {
-            if let Some(rest) = s.strip_prefix(home.as_ref()) {
-                if rest.is_empty() {
+        if !home.as_os_str().is_empty() {
+            if let Ok(rest) = path.strip_prefix(home) {
+                if rest.as_os_str().is_empty() {
                     return "~".to_string();
                 }
-                if rest.starts_with('/') {
-                    return format!("~{rest}");
-                }
+                // `strip_prefix` matches whole path components, so this is the
+                // native separator on every platform (e.g. `~\src` on Windows).
+                return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
             }
         }
     }
-    s.into_owned()
+    path.to_string_lossy().into_owned()
 }
 
 /// Document rows to pin at the top of the body for a given `scroll`: the commit
@@ -4061,6 +4059,7 @@ mod tests {
         assert_eq!(text(&fd("from.txt", "to.txt")), "diff --git a/from.txt b/to.txt");
     }
 
+    #[cfg(unix)]
     #[test]
     fn abbrev_home_replaces_only_a_whole_home_component() {
         let home = std::path::Path::new("/home/ayman");
@@ -4077,6 +4076,32 @@ mod tests {
         // Paths outside home, and the no-home case, are unchanged.
         assert_eq!(abbrev_with_home(std::path::Path::new("/etc/hosts"), Some(home)), "/etc/hosts");
         assert_eq!(abbrev_with_home(std::path::Path::new("/home/ayman"), None), "/home/ayman");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn abbrev_home_replaces_only_a_whole_home_component() {
+        let home = std::path::Path::new(r"C:\Users\ayman");
+        assert_eq!(abbrev_with_home(std::path::Path::new(r"C:\Users\ayman"), Some(home)), "~");
+        // The continuation uses the native separator (`\` on Windows).
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new(r"C:\Users\ayman\src\drift"), Some(home)),
+            r"~\src\drift"
+        );
+        // A sibling whose name merely starts with home is left untouched.
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new(r"C:\Users\ayman2\x"), Some(home)),
+            r"C:\Users\ayman2\x"
+        );
+        // Paths outside home, and the no-home case, are unchanged.
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new(r"C:\Windows\System32"), Some(home)),
+            r"C:\Windows\System32"
+        );
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new(r"C:\Users\ayman"), None),
+            r"C:\Users\ayman"
+        );
     }
 
     #[test]
