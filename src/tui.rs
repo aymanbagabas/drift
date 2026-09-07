@@ -1455,6 +1455,10 @@ impl App {
     /// whole body when unified).
     fn pane_cw(&self, pane: Option<Pane>) -> u16 {
         let body = self.program.screen().width().saturating_sub(self.sidebar_w());
+        // Not clamped to >= 1: a pane too narrow for any content yields 0, which
+        // `wrap_seg_count` treats as a single (unwrapped) segment, matching the
+        // `cw == 0` fallback in `draw_diff_row` so the (row, seg) mapping and the
+        // rendering agree.
         match pane {
             None => self.wrap_width(body, Gut::Both),
             Some(Pane::Left) => self.wrap_width(self.split_left_w(body), Gut::Old),
@@ -1463,7 +1467,6 @@ impl App {
                 self.wrap_width(body.saturating_sub(lw + 1), Gut::New)
             }
         }
-        .max(1)
     }
 
     /// Rows reserved at the bottom: the footer bar, plus the expanded help
@@ -1558,7 +1561,7 @@ impl App {
             return u16::MAX;
         }
         let body = self.program.screen().width().saturating_sub(self.sidebar_w());
-        self.wrap_width(body, Gut::Both).max(1)
+        self.wrap_width(body, Gut::Both)
     }
 
     /// Display width of the wrap glyph (usually 1).
@@ -1603,8 +1606,8 @@ impl App {
             let body = self.program.screen().width().saturating_sub(self.sidebar_w());
             let left_w = self.split_left_w(body);
             let right_w = body.saturating_sub(left_w + 1);
-            let lcw = self.wrap_width(left_w, Gut::Old).max(1);
-            let rcw = self.wrap_width(right_w, Gut::New).max(1);
+            let lcw = self.wrap_width(left_w, Gut::Old);
+            let rcw = self.wrap_width(right_w, Gut::New);
             let lsegs = wrap_seg_count(total, lcw, self.wrap_prefix_width(r, lcw));
             let rsegs = wrap_seg_count(total, rcw, self.wrap_prefix_width(r, rcw));
             match r.kind {
@@ -3598,7 +3601,7 @@ impl App {
         if !self.wrap {
             return 1;
         }
-        let cw = self.wrap_width(pane_w, gut).max(1);
+        let cw = self.wrap_width(pane_w, gut);
         wrap_seg_count(content_cols(r).max(1), cw, self.wrap_prefix_width(r, cw))
     }
 
