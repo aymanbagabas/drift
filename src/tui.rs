@@ -2977,6 +2977,14 @@ impl App {
         {
             let rows = self.rows();
             let body_total = self.body_h_screen() as u16;
+            // Precompute the visible (row, seg) mapping once so highlighting N
+            // matches doesn't recompute it (sticky lookup + vforward walk) for
+            // every match and every screen row.
+            let visual: Vec<(usize, usize)> = if self.wrap {
+                (0..body_total).map(|y| self.screen_y_to_visual(y)).collect()
+            } else {
+                Vec::new()
+            };
             for (mi, &(r, cstart, cend)) in self.matches.iter().enumerate() {
                 if r >= rows.len() {
                     continue;
@@ -2993,23 +3001,24 @@ impl App {
                 if self.wrap {
                     // A match may straddle several wrapped segments; paint the
                     // slice that falls inside each visible segment of row `r`.
-                    for y in 0..body_total {
-                        let (rr, seg) = self.screen_y_to_visual(y);
-                        if rr != r {
+                    // Pane-invariant values are hoisted out of the y-loop.
+                    for &pane in panes {
+                        if pane.is_some() && !App::row_in_pane(kind, pane) {
                             continue;
                         }
-                        for &pane in panes {
-                            if pane.is_some() && !App::row_in_pane(kind, pane) {
+                        let (origin, cs) = self.pane_geom(kind, pane);
+                        let right = if pane == Some(Pane::Left) {
+                            div.min(body_right)
+                        } else {
+                            body_right
+                        };
+                        let cw = self.pane_cw(pane);
+                        let prefix = self.wrap_prefix_width(&rows[r], cw);
+                        for (y, &(rr, seg)) in visual.iter().enumerate() {
+                            if rr != r {
                                 continue;
                             }
-                            let (origin, cs) = self.pane_geom(kind, pane);
-                            let right = if pane == Some(Pane::Left) {
-                                div.min(body_right)
-                            } else {
-                                body_right
-                            };
-                            let cw = self.pane_cw(pane);
-                            let prefix = self.wrap_prefix_width(&rows[r], cw);
+                            let y = y as u16;
                             let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
                             let seg_w = if seg == 0 { cw } else { cw.saturating_sub(prefix) };
                             let seg_end = col_off.saturating_add(seg_w);
