@@ -707,6 +707,10 @@ pub struct App {
     source: Source,
     opts: crate::git::Opts,
     toplevel: Option<PathBuf>,
+    /// The repo top-level, pre-abbreviated with `~`, for the window title.
+    /// `toplevel` never changes for the lifetime of the app, so this is
+    /// computed once instead of re-running `home_dir()` on every render.
+    title_dir: Option<String>,
     files: Vec<FileDiff>,
     /// Commit metadata lines (the `git show` header: hash, author, date, and
     /// message) that precede the diff, captured from the source's preamble.
@@ -876,6 +880,8 @@ impl App {
         // so clicks and wheel work immediately (and in non-interactive tests).
         program.enable_mouse(MouseTracking::empty())?;
         let show_meta = config.commit_meta;
+        let toplevel = crate::git::toplevel();
+        let title_dir = toplevel.as_deref().map(abbrev_home);
         let mut app = App {
             program,
             config,
@@ -883,7 +889,8 @@ impl App {
             highlighter,
             source,
             opts,
-            toplevel: crate::git::toplevel(),
+            toplevel,
+            title_dir,
             files: Vec::new(),
             commit_meta: Vec::new(),
             show_meta,
@@ -2748,9 +2755,8 @@ impl App {
     }
 
     fn update_title(&mut self) -> io::Result<()> {
-        let dir = self.toplevel.as_deref().map(abbrev_home);
         let file = self.files.get(self.selected).map(|f| f.path());
-        let want = match (file, dir) {
+        let want = match (file, self.title_dir.as_deref()) {
             (Some(f), Some(d)) => format!("{f} · {d} · drift"),
             (Some(f), None) => format!("{f} · drift"),
             (None, Some(d)) => format!("{d} · drift"),
