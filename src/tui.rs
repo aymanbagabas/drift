@@ -2,7 +2,7 @@
 //! bottom footer, driven by an uncurses `Screen`.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -707,6 +707,10 @@ pub struct App {
     source: Source,
     opts: crate::git::Opts,
     toplevel: Option<PathBuf>,
+    /// The repo top-level, pre-abbreviated with `~`, for the window title.
+    /// `toplevel` never changes for the lifetime of the app, so this is
+    /// computed once instead of re-running `home_dir()` on every render.
+    title_dir: Option<String>,
     files: Vec<FileDiff>,
     /// Commit metadata lines (the `git show` header: hash, author, date, and
     /// message) that precede the diff, captured from the source's preamble.
@@ -876,6 +880,8 @@ impl App {
         // so clicks and wheel work immediately (and in non-interactive tests).
         program.enable_mouse(MouseTracking::empty())?;
         let show_meta = config.commit_meta;
+        let toplevel = crate::git::toplevel();
+        let title_dir = toplevel.as_deref().map(abbrev_home);
         let mut app = App {
             program,
             config,
@@ -883,7 +889,8 @@ impl App {
             highlighter,
             source,
             opts,
-            toplevel: crate::git::toplevel(),
+            toplevel,
+            title_dir,
             files: Vec::new(),
             commit_meta: Vec::new(),
             show_meta,
@@ -2748,9 +2755,12 @@ impl App {
     }
 
     fn update_title(&mut self) -> io::Result<()> {
-        let want = match self.files.get(self.selected) {
-            Some(f) => format!("{} · drift", f.path()),
-            None => "drift".to_string(),
+        let file = self.files.get(self.selected).map(|f| f.path());
+        let want = match (file, self.title_dir.as_deref()) {
+            (Some(f), Some(d)) => format!("{f} · {d} · drift"),
+            (Some(f), None) => format!("{f} · drift"),
+            (None, Some(d)) => format!("{d} · drift"),
+            (None, None) => "drift".to_string(),
         };
         if want != self.title {
             self.program.set_title(&want)?;
@@ -3551,6 +3561,37 @@ fn file_of_row(starts: &[usize], row: usize) -> usize {
     starts.partition_point(|&s| s <= row).saturating_sub(1)
 }
 
+/// Render a path for display, abbreviating the user's home directory to `~`
+/// (so `/Users/ayman/src/drift` shows as `~/src/drift`). Only a whole leading
+/// path component is replaced, so `/home/ayman2` is left untouched when the
+/// home directory is `/home/ayman`.
+fn abbrev_home(path: &Path) -> String {
+    abbrev_with_home(path, std::env::home_dir().as_deref())
+}
+
+fn abbrev_with_home(path: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home {
+        if !home.as_os_str().is_empty() {
+            if let Ok(rest) = path.strip_prefix(home) {
+                if rest.as_os_str().is_empty() {
+                    return "~".to_string();
+                }
+                // Rebuild the tail from components so the separators are always
+                // native. `rest.display()` would preserve whatever separators
+                // the input used (Windows accepts `/` too), which could produce
+                // a mixed result like `~\src/drift`.
+                let mut out = String::from("~");
+                for comp in rest.components() {
+                    out.push(std::path::MAIN_SEPARATOR);
+                    out.push_str(&comp.as_os_str().to_string_lossy());
+                }
+                return out;
+            }
+        }
+    }
+    path.to_string_lossy().into_owned()
+}
+
 /// Document rows to pin at the top of the body for a given `scroll`: the commit
 /// line (for a single commit), the enclosing file header, and the current hunk
 /// header, but only once they've scrolled strictly above the top content line
@@ -3897,7 +3938,7 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, Face, Mascot, Sel, Span, MASCOT_H, MASCOT_W};
+    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, abbrev_with_home, Face, Mascot, Sel, Span, MASCOT_H, MASCOT_W};
     use regex::RegexBuilder;
     use uncurses::text::{grapheme_cells, WidthMode};
 
@@ -4029,6 +4070,57 @@ mod tests {
         assert_eq!(text(&fd("old.txt", "/dev/null")), "diff --git a/old.txt b/old.txt");
         // Rename keeps both distinct paths.
         assert_eq!(text(&fd("from.txt", "to.txt")), "diff --git a/from.txt b/to.txt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abbrev_home_replaces_only_a_whole_home_component() {
+        let home = std::path::Path::new("/home/ayman");
+        assert_eq!(abbrev_with_home(std::path::Path::new("/home/ayman"), Some(home)), "~");
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new("/home/ayman/src/drift"), Some(home)),
+            "~/src/drift"
+        );
+        // A sibling whose name merely starts with home is left untouched.
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new("/home/ayman2/x"), Some(home)),
+            "/home/ayman2/x"
+        );
+        // Paths outside home, and the no-home case, are unchanged.
+        assert_eq!(abbrev_with_home(std::path::Path::new("/etc/hosts"), Some(home)), "/etc/hosts");
+        assert_eq!(abbrev_with_home(std::path::Path::new("/home/ayman"), None), "/home/ayman");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn abbrev_home_replaces_only_a_whole_home_component() {
+        let home = std::path::Path::new(r"C:\Users\ayman");
+        assert_eq!(abbrev_with_home(std::path::Path::new(r"C:\Users\ayman"), Some(home)), "~");
+        // The continuation uses the native separator (`\` on Windows).
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new(r"C:\Users\ayman\src\drift"), Some(home)),
+            r"~\src\drift"
+        );
+        // Forward slashes in the input (Windows accepts them) are normalized to
+        // the native separator, never mixed.
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new("C:/Users/ayman/src/drift"), Some(home)),
+            r"~\src\drift"
+        );
+        // A sibling whose name merely starts with home is left untouched.
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new(r"C:\Users\ayman2\x"), Some(home)),
+            r"C:\Users\ayman2\x"
+        );
+        // Paths outside home, and the no-home case, are unchanged.
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new(r"C:\Windows\System32"), Some(home)),
+            r"C:\Windows\System32"
+        );
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new(r"C:\Users\ayman"), None),
+            r"C:\Users\ayman"
+        );
     }
 
     #[test]
