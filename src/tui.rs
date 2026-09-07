@@ -1567,8 +1567,10 @@ impl App {
     }
 
     /// Break-indent width for a row: the display width of its leading spaces,
-    /// capped so a continuation line keeps content room after the indent, the
-    /// wrap glyph, and its trailing space. Tabs were already expanded to spaces
+    /// capped so a continuation line still keeps a few content columns after
+    /// the indent, the wrap glyph, and its trailing space. The `+ 5` reserves
+    /// the glyph width plus five columns: one for the trailing space and four
+    /// as a minimum of visible content. Tabs were already expanded to spaces
     /// for content rows.
     fn wrap_indent_width(&self, r: &Row, cw: u16) -> u16 {
         let n = r
@@ -1596,7 +1598,7 @@ impl App {
         if !matches!(r.kind, RowKind::Add | RowKind::Remove | RowKind::Context) {
             return 1;
         }
-        let total = (r.content.len() as u16).max(1);
+        let total = content_cols(r).max(1);
         if self.split {
             let body = self.program.screen().width().saturating_sub(self.sidebar_w());
             let left_w = self.split_left_w(body);
@@ -2894,7 +2896,7 @@ impl App {
                     continue;
                 }
                 let (origin, cstart) = self.pane_geom(row.kind, sel.pane);
-                let len = row.content.len() as u16;
+                let len = content_cols(row);
                 let start = if r == sr { sc as u16 } else { 0 };
                 let end = if r == er { ec as u16 } else { len };
                 let prefix = self.wrap_prefix_width(row, cw);
@@ -2931,7 +2933,7 @@ impl App {
                 }
                 let (origin, cstart) = self.pane_geom(row.kind, sel.pane);
                 let cs = origin + cstart;
-                let len = row.content.len() as u16;
+                let len = content_cols(row);
                 let start = if r == sr { sc as u16 } else { 0 };
                 let end = if r == er { ec as u16 } else { len };
                 // Map content columns to screen columns through the horizontal
@@ -2990,7 +2992,7 @@ impl App {
                     continue;
                 }
                 let kind = rows[r].kind;
-                let len = rows[r].content.len() as u16;
+                let len = content_cols(&rows[r]);
                 let cur = self.match_i == Some(mi);
                 let panes: &[Option<Pane>] =
                     if !split || matches!(kind, RowKind::Hunk | RowKind::Note) {
@@ -3597,7 +3599,7 @@ impl App {
             return 1;
         }
         let cw = self.wrap_width(pane_w, gut).max(1);
-        wrap_seg_count((r.content.len() as u16).max(1), cw, self.wrap_prefix_width(r, cw))
+        wrap_seg_count(content_cols(r).max(1), cw, self.wrap_prefix_width(r, cw))
     }
 
     /// Fill a pane region with the row background (used for the shorter side of
@@ -4030,6 +4032,13 @@ fn abbrev_with_home(path: &Path, home: Option<&Path>) -> String {
         }
     }
     path.to_string_lossy().into_owned()
+}
+
+/// Content column count of a row as `u16`, saturating at `u16::MAX` for
+/// pathologically long lines so the conversion can't wrap and misreport the
+/// width (which would corrupt the wrapped segment count and height).
+fn content_cols(r: &Row) -> u16 {
+    u16::try_from(r.content.len()).unwrap_or(u16::MAX)
 }
 
 /// Number of visual segments for `total` content columns wrapped to width `cw`,
