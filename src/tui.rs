@@ -1451,6 +1451,37 @@ impl App {
         ((self.scroll + (y as usize - k)).min(last), 0)
     }
 
+    /// The `(row, seg)` shown at each body screen row, built in one pass.
+    /// `screen_y_to_visual` recomputes the sticky band and re-walks `vforward`
+    /// from the top on every call, so calling it per screen row (as selection
+    /// and match painting do) is quadratic and allocates each time. This
+    /// computes the sticky band once and advances one visual line at a time,
+    /// keeping per-frame painting linear in the viewport height.
+    fn visual_map(&self) -> Vec<(usize, usize)> {
+        let sticky = self.sticky_rows();
+        let k = sticky.len();
+        let body_total = self.body_h_screen();
+        let last = self.rows().len().saturating_sub(1);
+        let mut v = Vec::with_capacity(body_total);
+        for &r in sticky.iter().take(body_total) {
+            v.push((r, 0));
+        }
+        if self.wrap {
+            let (mut row, mut seg) = (self.scroll, self.scroll_seg);
+            for _ in k..body_total {
+                v.push((row, seg));
+                let (nr, ns) = self.vforward(row, seg, 1);
+                row = nr;
+                seg = ns;
+            }
+        } else {
+            for i in k..body_total {
+                v.push(((self.scroll + (i - k)).min(last), 0));
+            }
+        }
+        v
+    }
+
     /// Content width available for wrapping inside the selection `pane` (the
     /// whole body when unified).
     fn pane_cw(&self, pane: Option<Pane>) -> u16 {
@@ -2894,9 +2925,8 @@ impl App {
             let rows = self.rows();
             let er = er.min(rows.len().saturating_sub(1));
             let cw = self.pane_cw(sel.pane);
-            let body_total = self.body_h_screen() as u16;
-            for y in 0..body_total {
-                let (r, seg) = self.screen_y_to_visual(y);
+            for (y, &(r, seg)) in self.visual_map().iter().enumerate() {
+                let y = y as u16;
                 if r < sr || r > er {
                     continue;
                 }
@@ -2987,12 +3017,11 @@ impl App {
         let mut segs: Vec<(u16, u16, u16, bool)> = Vec::new();
         {
             let rows = self.rows();
-            let body_total = self.body_h_screen() as u16;
             // Precompute the visible (row, seg) mapping once so highlighting N
             // matches doesn't recompute it (sticky lookup + vforward walk) for
             // every match and every screen row.
             let visual: Vec<(usize, usize)> = if self.wrap {
-                (0..body_total).map(|y| self.screen_y_to_visual(y)).collect()
+                self.visual_map()
             } else {
                 Vec::new()
             };
