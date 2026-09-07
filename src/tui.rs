@@ -3570,9 +3570,16 @@ fn abbrev_with_home(path: &Path, home: Option<&Path>) -> String {
                 if rest.as_os_str().is_empty() {
                     return "~".to_string();
                 }
-                // `strip_prefix` matches whole path components, so this is the
-                // native separator on every platform (e.g. `~\src` on Windows).
-                return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
+                // Rebuild the tail from components so the separators are always
+                // native. `rest.display()` would preserve whatever separators
+                // the input used (Windows accepts `/` too), which could produce
+                // a mixed result like `~\src/drift`.
+                let mut out = String::from("~");
+                for comp in rest.components() {
+                    out.push(std::path::MAIN_SEPARATOR);
+                    out.push_str(&comp.as_os_str().to_string_lossy());
+                }
+                return out;
             }
         }
     }
@@ -4086,6 +4093,12 @@ mod tests {
         // The continuation uses the native separator (`\` on Windows).
         assert_eq!(
             abbrev_with_home(std::path::Path::new(r"C:\Users\ayman\src\drift"), Some(home)),
+            r"~\src\drift"
+        );
+        // Forward slashes in the input (Windows accepts them) are normalized to
+        // the native separator, never mixed.
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new("C:/Users/ayman/src/drift"), Some(home)),
             r"~\src\drift"
         );
         // A sibling whose name merely starts with home is left untouched.
