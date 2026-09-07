@@ -2,7 +2,7 @@
 //! bottom footer, driven by an uncurses `Screen`.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2748,9 +2748,13 @@ impl App {
     }
 
     fn update_title(&mut self) -> io::Result<()> {
-        let want = match self.files.get(self.selected) {
-            Some(f) => format!("{} · drift", f.path()),
-            None => "drift".to_string(),
+        let dir = self.toplevel.as_deref().map(abbrev_home);
+        let file = self.files.get(self.selected).map(|f| f.path());
+        let want = match (file, dir) {
+            (Some(f), Some(d)) => format!("{f} · {d} · drift"),
+            (Some(f), None) => format!("{f} · drift"),
+            (None, Some(d)) => format!("{d} · drift"),
+            (None, None) => "drift".to_string(),
         };
         if want != self.title {
             self.program.set_title(&want)?;
@@ -3551,6 +3555,32 @@ fn file_of_row(starts: &[usize], row: usize) -> usize {
     starts.partition_point(|&s| s <= row).saturating_sub(1)
 }
 
+/// Render a path for display, abbreviating the user's home directory to `~`
+/// (so `/Users/ayman/src/drift` shows as `~/src/drift`). Only a whole leading
+/// path component is replaced, so `/home/ayman2` is left untouched when the
+/// home directory is `/home/ayman`.
+fn abbrev_home(path: &Path) -> String {
+    abbrev_with_home(path, std::env::home_dir().as_deref())
+}
+
+fn abbrev_with_home(path: &Path, home: Option<&Path>) -> String {
+    let s = path.to_string_lossy();
+    if let Some(home) = home {
+        let home = home.to_string_lossy();
+        if !home.is_empty() {
+            if let Some(rest) = s.strip_prefix(home.as_ref()) {
+                if rest.is_empty() {
+                    return "~".to_string();
+                }
+                if rest.starts_with('/') {
+                    return format!("~{rest}");
+                }
+            }
+        }
+    }
+    s.into_owned()
+}
+
 /// Document rows to pin at the top of the body for a given `scroll`: the commit
 /// line (for a single commit), the enclosing file header, and the current hunk
 /// header, but only once they've scrolled strictly above the top content line
@@ -3897,7 +3927,7 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, Face, Mascot, Sel, Span, MASCOT_H, MASCOT_W};
+    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, abbrev_with_home, Face, Mascot, Sel, Span, MASCOT_H, MASCOT_W};
     use regex::RegexBuilder;
     use uncurses::text::{grapheme_cells, WidthMode};
 
@@ -4029,6 +4059,24 @@ mod tests {
         assert_eq!(text(&fd("old.txt", "/dev/null")), "diff --git a/old.txt b/old.txt");
         // Rename keeps both distinct paths.
         assert_eq!(text(&fd("from.txt", "to.txt")), "diff --git a/from.txt b/to.txt");
+    }
+
+    #[test]
+    fn abbrev_home_replaces_only_a_whole_home_component() {
+        let home = std::path::Path::new("/home/ayman");
+        assert_eq!(abbrev_with_home(std::path::Path::new("/home/ayman"), Some(home)), "~");
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new("/home/ayman/src/drift"), Some(home)),
+            "~/src/drift"
+        );
+        // A sibling whose name merely starts with home is left untouched.
+        assert_eq!(
+            abbrev_with_home(std::path::Path::new("/home/ayman2/x"), Some(home)),
+            "/home/ayman2/x"
+        );
+        // Paths outside home, and the no-home case, are unchanged.
+        assert_eq!(abbrev_with_home(std::path::Path::new("/etc/hosts"), Some(home)), "/etc/hosts");
+        assert_eq!(abbrev_with_home(std::path::Path::new("/home/ayman"), None), "/home/ayman");
     }
 
     #[test]
