@@ -3874,7 +3874,11 @@ impl App {
         // prefixed with the wrap glyph and a space (break-indent). Off, it's the
         // live horizontal scroll.
         let cw = avail.saturating_sub(content_origin);
-        let (hs, content_x0) = if self.wrap {
+        // `cw == 0` means the pane is too narrow for any content (all gutter and
+        // sign). Fall through to the non-wrap offset so the wrap math (which
+        // elsewhere clamps widths to >= 1) stays consistent and nothing is drawn
+        // at or past the right edge.
+        let (hs, content_x0) = if self.wrap && cw > 0 {
             let prefix = self.wrap_prefix_width(r, cw);
             let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
             if seg > 0 {
@@ -3882,9 +3886,12 @@ impl App {
                 // the break-indent, in the line-number grey, with a space after
                 // it before the wrapped content resumes.
                 let indent = self.wrap_indent_width(r, cw);
-                let sym = self.config.wrap_symbol.clone();
                 let st = bg(self.theme.line_number.clone());
-                self.program.screen_mut().set_str((content_origin + indent, y), &sym, st);
+                self.program.screen_mut().set_str(
+                    (content_origin + indent, y),
+                    &self.config.wrap_symbol,
+                    st,
+                );
             }
             (col_off, content_origin + draw_indent)
         } else {
