@@ -2486,6 +2486,12 @@ impl App {
                     self.wrap = !self.wrap;
                     self.hscroll = 0;
                     self.scroll_seg = 0;
+                    // Rows change visual height when wrapping flips, so the old
+                    // top position may now be past `max_scroll_pos` (leaving
+                    // blank space at the bottom); clamp it to the new layout.
+                    let (r, s) = self.clamp_scroll_pos(self.scroll, self.scroll_seg);
+                    self.scroll = r;
+                    self.scroll_seg = s;
                 } else if k.matches("F") {
                     self.view = View::Stat;
                 } else if k.matches("B") {
