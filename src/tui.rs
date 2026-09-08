@@ -3922,14 +3922,20 @@ impl App {
             if seg > 0 {
                 // The wrap glyph is the first char of the continuation line, at
                 // the break-indent, in the line-number grey, with a space after
-                // it before the wrapped content resumes.
+                // it before the wrapped content resumes. Only draw it when the
+                // reserved prefix actually leaves room: on ultra-narrow panes
+                // `wrap_prefix_width` clamps the prefix so tight that the glyph
+                // would overwrite the first content cell (and desync the
+                // input-mapping/highlighting, which key off `prefix`).
                 let indent = self.wrap_indent_width(r, cw);
-                let st = bg(self.theme.line_number.clone());
-                self.program.screen_mut().set_str(
-                    (content_origin + indent, y),
-                    &self.config.wrap_symbol,
-                    st,
-                );
+                if indent + self.wrap_glyph_w() <= prefix {
+                    let st = bg(self.theme.line_number.clone());
+                    self.program.screen_mut().set_str(
+                        (content_origin + indent, y),
+                        &self.config.wrap_symbol,
+                        st,
+                    );
+                }
             }
             (col_off, content_origin + draw_indent)
         } else {
