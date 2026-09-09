@@ -1471,12 +1471,23 @@ impl App {
             for _ in k..body_total {
                 v.push((row, seg));
                 let (nr, ns) = self.vforward(row, seg, 1);
+                // `vforward` clamps at the last visual line; stop instead of
+                // padding the blank rows below a short document with copies of
+                // the last line (which paint_selection/paint_matches would then
+                // highlight as if content were there).
+                if (nr, ns) == (row, seg) {
+                    break;
+                }
                 row = nr;
                 seg = ns;
             }
         } else {
             for i in k..body_total {
-                v.push(((self.scroll + (i - k)).min(last), 0));
+                let r = self.scroll + (i - k);
+                if r > last {
+                    break;
+                }
+                v.push((r, 0));
             }
         }
         v
