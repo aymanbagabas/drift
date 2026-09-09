@@ -3150,6 +3150,18 @@ impl App {
         // peek already confirmed a `diff --git` is coming, so don't flash the
         // mascot in the gap before the first file paints.
         let empty = self.files.is_empty() && self.stream.is_none();
+        // A width change (terminal resize, sidebar or split-divider drag, or a
+        // mode toggle) reflows the wrapped rows, so the saved top segment may
+        // now exceed the row's height in the current layout. Clamp it before
+        // drawing so the render loop never skips the `scroll` row. `vheight`
+        // already accounts for the split layout.
+        if !empty && self.wrap {
+            let max_seg = self.vheight(self.scroll).saturating_sub(1);
+            self.scroll_seg = self.scroll_seg.min(max_seg);
+            let (r, s) = self.clamp_scroll_pos(self.scroll, self.scroll_seg);
+            self.scroll = r;
+            self.scroll_seg = s;
+        }
         if empty {
             // Body is blank; the mascot is painted last, above everything.
         } else if self.split {
