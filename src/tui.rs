@@ -1643,15 +1643,14 @@ impl App {
         if !matches!(r.kind, RowKind::Add | RowKind::Remove | RowKind::Context) {
             return 1;
         }
-        let total = content_cols(r).max(1);
         if self.split {
             let body = self.program.screen().width().saturating_sub(self.sidebar_w());
             let left_w = self.split_left_w(body);
             let right_w = body.saturating_sub(left_w + 1);
             let lcw = self.wrap_width(left_w, Gut::Old);
             let rcw = self.wrap_width(right_w, Gut::New);
-            let lsegs = wrap_seg_count(total, lcw, self.wrap_prefix_width(r, lcw));
-            let rsegs = wrap_seg_count(total, rcw, self.wrap_prefix_width(r, rcw));
+            let lsegs = wrap_seg_count(&r.content, lcw, self.wrap_prefix_width(r, lcw));
+            let rsegs = wrap_seg_count(&r.content, rcw, self.wrap_prefix_width(r, rcw));
             match r.kind {
                 RowKind::Remove => lsegs,
                 RowKind::Add => rsegs,
@@ -1659,7 +1658,7 @@ impl App {
             }
         } else {
             let cw = self.wrap_cw();
-            wrap_seg_count(total, cw, self.wrap_prefix_width(r, cw))
+            wrap_seg_count(&r.content, cw, self.wrap_prefix_width(r, cw))
         }
     }
 
@@ -1956,7 +1955,7 @@ impl App {
         // `col_off`, drawn at the segment's break-indent offset.
         let cw = self.pane_cw(pane);
         let prefix = self.wrap_prefix_width(&rows[row], cw);
-        let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+        let (col_off, draw_indent) = wrap_seg_offset(&rows[row].content, seg, cw, prefix);
         let content_start = origin + cs + draw_indent;
         let col = (col_off as usize + x.saturating_sub(content_start) as usize).min(len);
         (row, col)
@@ -2950,9 +2949,11 @@ impl App {
                 let start = if r == sr { sc as u16 } else { 0 };
                 let end = if r == er { ec as u16 } else { len };
                 let prefix = self.wrap_prefix_width(row, cw);
-                let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
-                let seg_w = if seg == 0 { cw } else { cw.saturating_sub(prefix) };
-                let seg_end = col_off.saturating_add(seg_w);
+                let (col_off, draw_indent) = wrap_seg_offset(&row.content, seg, cw, prefix);
+                // Exclusive end of this segment's content columns is the next
+                // segment's start (or the row's end), which may be a column
+                // short of the capacity when a wide cluster was pushed down.
+                let seg_end = wrap_seg_offset(&row.content, seg + 1, cw, prefix).0;
                 let s = start.max(col_off).min(len);
                 let e = end.min(seg_end).min(len);
                 if e > s {
@@ -3070,9 +3071,12 @@ impl App {
                                 continue;
                             }
                             let y = y as u16;
-                            let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
-                            let seg_w = if seg == 0 { cw } else { cw.saturating_sub(prefix) };
-                            let seg_end = col_off.saturating_add(seg_w);
+                            let (col_off, draw_indent) = wrap_seg_offset(&rows[r].content, seg, cw, prefix);
+                            // Exclusive end of this segment's content columns is
+                            // the next segment's start (or the row's end), which
+                            // may be a column short of the capacity when a wide
+                            // cluster was pushed to the next segment.
+                            let seg_end = wrap_seg_offset(&rows[r].content, seg + 1, cw, prefix).0;
                             let s = (cstart as u16).max(col_off).min(len);
                             let e = (cend as u16).min(seg_end).min(len);
                             if e > s {
@@ -3660,7 +3664,7 @@ impl App {
             return 1;
         }
         let cw = self.wrap_width(pane_w, gut);
-        wrap_seg_count(content_cols(r).max(1), cw, self.wrap_prefix_width(r, cw))
+        wrap_seg_count(&r.content, cw, self.wrap_prefix_width(r, cw))
     }
 
     /// Fill a pane region with the row background (used for the shorter side of
@@ -3941,7 +3945,7 @@ impl App {
         // at or past the right edge.
         let (hs, content_x0) = if self.wrap && cw > 0 {
             let prefix = self.wrap_prefix_width(r, cw);
-            let (col_off, draw_indent) = wrap_seg_offset(seg, cw, prefix);
+            let (col_off, draw_indent) = wrap_seg_offset(&r.content, seg, cw, prefix);
             if seg > 0 {
                 // The wrap glyph is the first char of the continuation line, at
                 // the break-indent, in the line-number grey, with a space after
@@ -4115,27 +4119,74 @@ fn content_cols(r: &Row) -> u16 {
     u16::try_from(r.content.len()).unwrap_or(u16::MAX)
 }
 
-/// Number of visual segments for `total` content columns wrapped to width `cw`,
-/// where continuation lines are indented by `indent` (break-indent), so they
-/// hold `cw - indent` columns each. The first line always holds `cw`.
-fn wrap_seg_count(total: u16, cw: u16, indent: u16) -> usize {
-    if cw == 0 || total <= cw {
+/// Number of visual segments for a content row wrapped so the first line holds
+/// up to `cw` display columns and each continuation holds up to `cw - prefix`
+/// (the break-indent). Breaks are aligned to grapheme-cluster boundaries — a
+/// wide (multi-column) cluster is moved wholly to the next segment rather than
+/// split — so wide characters are never dropped at a segment boundary.
+fn wrap_seg_count(content: &[Cell], cw: u16, prefix: u16) -> usize {
+    if cw == 0 {
         return 1;
     }
-    let cont = cw.saturating_sub(indent).max(1);
-    1 + (total - cw).div_ceil(cont) as usize
+    let cw = cw as u32;
+    let cont = cw.saturating_sub(prefix as u32).max(1);
+    let mut segs = 1usize;
+    let mut seg_w = 0u32;
+    let mut limit = cw;
+    let mut i = 0usize;
+    while i < content.len() {
+        let gw = (content[i].width().max(1)) as u32;
+        // A cluster that doesn't fit starts a new segment. `seg_w > 0` lets a
+        // single oversized cluster occupy its own segment instead of looping.
+        if seg_w + gw > limit && seg_w > 0 {
+            segs += 1;
+            seg_w = 0;
+            limit = cont;
+        }
+        seg_w += gw;
+        i += 1;
+        while i < content.len() && content[i].is_continuation() {
+            i += 1;
+        }
+    }
+    segs
 }
 
 /// For visual segment `seg`, the `(content_column_offset, draw_indent)`: the
-/// first column of content the segment shows, and how far past the content
-/// origin it is drawn. Segment 0 starts at column 0 with no indent; each
-/// continuation starts after the first `cw` columns and is indented.
-fn wrap_seg_offset(seg: usize, cw: u16, indent: u16) -> (u16, u16) {
-    if seg == 0 {
+/// first display column of content the segment shows (aligned to a
+/// grapheme-cluster boundary) and how far past the content origin it is drawn.
+/// Segment 0 starts at column 0 with no indent; each continuation is indented
+/// by `prefix` (the break-indent plus the wrap glyph and its trailing space).
+fn wrap_seg_offset(content: &[Cell], seg: usize, cw: u16, prefix: u16) -> (u16, u16) {
+    if seg == 0 || cw == 0 {
         return (0, 0);
     }
-    let cont = cw.saturating_sub(indent).max(1);
-    (cw + (seg as u16 - 1) * cont, indent)
+    let cw = cw as u32;
+    let cont = cw.saturating_sub(prefix as u32).max(1);
+    let mut done = 0usize;
+    let mut seg_w = 0u32;
+    let mut col = 0u32;
+    let mut limit = cw;
+    let mut i = 0usize;
+    while i < content.len() {
+        let gw = (content[i].width().max(1)) as u32;
+        if seg_w + gw > limit && seg_w > 0 {
+            done += 1;
+            if done == seg {
+                return (col.min(u16::MAX as u32) as u16, prefix);
+            }
+            seg_w = 0;
+            limit = cont;
+        }
+        seg_w += gw;
+        col += gw;
+        i += 1;
+        while i < content.len() && content[i].is_continuation() {
+            i += 1;
+        }
+    }
+    // `seg` past the last segment: clamp to the end of the content.
+    (col.min(u16::MAX as u32) as u16, prefix)
 }
 
 /// Document rows to pin at the top of the body for a given `scroll`: the commit
@@ -4765,33 +4816,45 @@ mod tests {
 
     #[test]
     fn wrap_seg_count_counts_visual_lines() {
-        use super::wrap_seg_count;
+        use super::{text_cells, wrap_seg_count};
+        let a = |n: usize| text_cells(&"a".repeat(n));
         // Fits: one line.
-        assert_eq!(wrap_seg_count(10, 20, 0), 1);
-        assert_eq!(wrap_seg_count(20, 20, 0), 1);
-        // No indent: ceil over the width, plus nothing special.
-        assert_eq!(wrap_seg_count(21, 20, 0), 2);
-        assert_eq!(wrap_seg_count(40, 20, 0), 2);
-        assert_eq!(wrap_seg_count(41, 20, 0), 3);
-        // With break-indent, continuation lines hold `cw - indent` columns.
+        assert_eq!(wrap_seg_count(&a(10), 20, 0), 1);
+        assert_eq!(wrap_seg_count(&a(20), 20, 0), 1);
+        // No indent: ceil over the width.
+        assert_eq!(wrap_seg_count(&a(21), 20, 0), 2);
+        assert_eq!(wrap_seg_count(&a(40), 20, 0), 2);
+        assert_eq!(wrap_seg_count(&a(41), 20, 0), 3);
+        // With break-indent, continuation lines hold `cw - prefix` columns.
         // First line takes 20; the remaining 20 wrap at 16 -> 2 more lines.
-        assert_eq!(wrap_seg_count(40, 20, 4), 3);
+        assert_eq!(wrap_seg_count(&a(40), 20, 4), 3);
         // Degenerate width never divides by zero.
-        assert_eq!(wrap_seg_count(100, 0, 0), 1);
+        assert_eq!(wrap_seg_count(&a(100), 0, 0), 1);
+        // A wide (2-column) grapheme that would straddle the boundary wraps
+        // wholly to the next segment instead of splitting: `aaaa界` at cw=5
+        // keeps `aaaa` on line 0 (界 can't fit in the last column) and 界 on
+        // line 1; at cw=6 it fits on one line.
+        assert_eq!(wrap_seg_count(&text_cells("aaaa界"), 5, 0), 2);
+        assert_eq!(wrap_seg_count(&text_cells("aaaa界"), 6, 0), 1);
     }
 
     #[test]
     fn wrap_seg_offset_places_segments() {
-        use super::wrap_seg_offset;
+        use super::{text_cells, wrap_seg_offset};
+        let a = |n: usize| text_cells(&"a".repeat(n));
         // First segment: whole width from column 0, no indent.
-        assert_eq!(wrap_seg_offset(0, 20, 4), (0, 0));
+        assert_eq!(wrap_seg_offset(&a(60), 0, 20, 4), (0, 0));
         // Continuations start after the first `cw` columns, then advance by
-        // `cw - indent`, and are drawn indented.
-        assert_eq!(wrap_seg_offset(1, 20, 4), (20, 4));
-        assert_eq!(wrap_seg_offset(2, 20, 4), (36, 4));
+        // `cw - prefix`, and are drawn indented.
+        assert_eq!(wrap_seg_offset(&a(60), 1, 20, 4), (20, 4));
+        assert_eq!(wrap_seg_offset(&a(60), 2, 20, 4), (36, 4));
         // No indent: uniform `cw` steps, like plain segment offsets.
-        assert_eq!(wrap_seg_offset(1, 20, 0), (20, 0));
-        assert_eq!(wrap_seg_offset(2, 20, 0), (40, 0));
+        assert_eq!(wrap_seg_offset(&a(60), 1, 20, 0), (20, 0));
+        assert_eq!(wrap_seg_offset(&a(60), 2, 20, 0), (40, 0));
+        // A wide grapheme moved to the next segment pulls the boundary back a
+        // column: `aaaa界bbbb` at cw=5 starts segment 1 at column 4 (the 界),
+        // not the fixed column 5 that would split it.
+        assert_eq!(wrap_seg_offset(&text_cells("aaaa界bbbb"), 1, 5, 0), (4, 0));
     }
 
     #[test]
