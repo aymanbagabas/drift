@@ -1630,7 +1630,12 @@ impl App {
     /// How far a continuation line's content is pushed right: the break-indent,
     /// then the wrap glyph and one space (which prefix the wrapped content).
     fn wrap_prefix_width(&self, r: &Row, cw: u16) -> u16 {
-        (self.wrap_indent_width(r, cw) + self.wrap_glyph_w() + 1).min(cw.saturating_sub(1))
+        // Cap so a continuation keeps at least two content columns — enough for
+        // one wide (2-cell) grapheme. Otherwise an ultra-narrow pane could give
+        // a continuation a single usable column, and a wide cluster placed there
+        // would be dropped by the renderer (`slice_fit` can't emit half a
+        // cluster). Rendering and mapping both read this, so they stay in step.
+        (self.wrap_indent_width(r, cw) + self.wrap_glyph_w() + 1).min(cw.saturating_sub(2))
     }
 
     /// Visual height (wrapped segments) of a row in the current layout. In split
