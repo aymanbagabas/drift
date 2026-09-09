@@ -2935,6 +2935,9 @@ impl App {
             let rows = self.rows();
             let er = er.min(rows.len().saturating_sub(1));
             let cw = self.pane_cw(sel.pane);
+            // Cache the break offsets per row; a row's segments are contiguous
+            // in the visual map, so this scans each selected row once.
+            let mut breaks_cache: Option<(usize, u16, Vec<u16>)> = None;
             for (y, &(r, seg)) in self.visual_map().iter().enumerate() {
                 let y = y as u16;
                 if r < sr || r > er {
@@ -2948,12 +2951,14 @@ impl App {
                 let len = content_cols(row);
                 let start = if r == sr { sc as u16 } else { 0 };
                 let end = if r == er { ec as u16 } else { len };
-                let prefix = self.wrap_prefix_width(row, cw);
-                let (col_off, draw_indent) = wrap_seg_offset(&row.content, seg, cw, prefix);
-                // Exclusive end of this segment's content columns is the next
-                // segment's start (or the row's end), which may be a column
-                // short of the capacity when a wide cluster was pushed down.
-                let seg_end = wrap_seg_offset(&row.content, seg + 1, cw, prefix).0;
+                if breaks_cache.as_ref().is_none_or(|(cr, _, _)| *cr != r) {
+                    let prefix = self.wrap_prefix_width(row, cw);
+                    breaks_cache = Some((r, prefix, wrap_breaks(&row.content, cw, prefix)));
+                }
+                let (_, prefix, breaks) = breaks_cache.as_ref().unwrap();
+                let col_off = breaks[seg.min(breaks.len() - 1)];
+                let seg_end = breaks[(seg + 1).min(breaks.len() - 1)];
+                let draw_indent = if seg == 0 { 0 } else { *prefix };
                 let s = start.max(col_off).min(len);
                 let e = end.min(seg_end).min(len);
                 if e > s {
@@ -3066,17 +3071,17 @@ impl App {
                         };
                         let cw = self.pane_cw(pane);
                         let prefix = self.wrap_prefix_width(&rows[r], cw);
+                        // One scan per row/pane; segment `s` spans
+                        // `[breaks[s], breaks[s + 1])`.
+                        let breaks = wrap_breaks(&rows[r].content, cw, prefix);
                         for (y, &(rr, seg)) in visual.iter().enumerate() {
                             if rr != r {
                                 continue;
                             }
                             let y = y as u16;
-                            let (col_off, draw_indent) = wrap_seg_offset(&rows[r].content, seg, cw, prefix);
-                            // Exclusive end of this segment's content columns is
-                            // the next segment's start (or the row's end), which
-                            // may be a column short of the capacity when a wide
-                            // cluster was pushed to the next segment.
-                            let seg_end = wrap_seg_offset(&rows[r].content, seg + 1, cw, prefix).0;
+                            let col_off = breaks[seg.min(breaks.len() - 1)];
+                            let seg_end = breaks[(seg + 1).min(breaks.len() - 1)];
+                            let draw_indent = if seg == 0 { 0 } else { prefix };
                             let s = (cstart as u16).max(col_off).min(len);
                             let e = (cend as u16).min(seg_end).min(len);
                             if e > s {
@@ -4119,6 +4124,12 @@ fn content_cols(r: &Row) -> u16 {
     u16::try_from(r.content.len()).unwrap_or(u16::MAX)
 }
 
+/// Largest column index the u16 wrap math represents. Cluster scans stop here
+/// so a pathologically long line stays bounded and `wrap_seg_count` /
+/// `wrap_seg_offset` / `wrap_breaks` agree with the `u16` column domain used
+/// elsewhere (`content_cols` saturates to the same cap).
+const WRAP_COL_CAP: u32 = u16::MAX as u32;
+
 /// Number of visual segments for a content row wrapped so the first line holds
 /// up to `cw` display columns and each continuation holds up to `cw - prefix`
 /// (the break-indent). Breaks are aligned to grapheme-cluster boundaries — a
@@ -4132,10 +4143,14 @@ fn wrap_seg_count(content: &[Cell], cw: u16, prefix: u16) -> usize {
     let cont = cw.saturating_sub(prefix as u32).max(1);
     let mut segs = 1usize;
     let mut seg_w = 0u32;
+    let mut col = 0u32;
     let mut limit = cw;
     let mut i = 0usize;
     while i < content.len() {
         let gw = (content[i].width().max(1)) as u32;
+        if col + gw > WRAP_COL_CAP {
+            break;
+        }
         // A cluster that doesn't fit starts a new segment. `seg_w > 0` lets a
         // single oversized cluster occupy its own segment instead of looping.
         if seg_w + gw > limit && seg_w > 0 {
@@ -4144,12 +4159,50 @@ fn wrap_seg_count(content: &[Cell], cw: u16, prefix: u16) -> usize {
             limit = cont;
         }
         seg_w += gw;
+        col += gw;
         i += 1;
         while i < content.len() && content[i].is_continuation() {
             i += 1;
         }
     }
     segs
+}
+
+/// Segment start columns for a wrapped content row (grapheme-aligned), with a
+/// trailing sentinel equal to the capped total width, so segment `i` spans
+/// `[breaks[i], breaks[i + 1])`. Computed in one scan so a row's visible
+/// segments can reuse it instead of re-walking the row per segment.
+fn wrap_breaks(content: &[Cell], cw: u16, prefix: u16) -> Vec<u16> {
+    let mut breaks = vec![0u16];
+    let (first, cont) = if cw == 0 {
+        (WRAP_COL_CAP, WRAP_COL_CAP) // no wrapping: a single segment
+    } else {
+        let cw = cw as u32;
+        (cw, cw.saturating_sub(prefix as u32).max(1))
+    };
+    let mut seg_w = 0u32;
+    let mut col = 0u32;
+    let mut limit = first;
+    let mut i = 0usize;
+    while i < content.len() {
+        let gw = (content[i].width().max(1)) as u32;
+        if col + gw > WRAP_COL_CAP {
+            break;
+        }
+        if seg_w + gw > limit && seg_w > 0 {
+            breaks.push(col as u16);
+            seg_w = 0;
+            limit = cont;
+        }
+        seg_w += gw;
+        col += gw;
+        i += 1;
+        while i < content.len() && content[i].is_continuation() {
+            i += 1;
+        }
+    }
+    breaks.push(col as u16);
+    breaks
 }
 
 /// For visual segment `seg`, the `(content_column_offset, draw_indent)`: the
@@ -4170,10 +4223,13 @@ fn wrap_seg_offset(content: &[Cell], seg: usize, cw: u16, prefix: u16) -> (u16, 
     let mut i = 0usize;
     while i < content.len() {
         let gw = (content[i].width().max(1)) as u32;
+        if col + gw > WRAP_COL_CAP {
+            break;
+        }
         if seg_w + gw > limit && seg_w > 0 {
             done += 1;
             if done == seg {
-                return (col.min(u16::MAX as u32) as u16, prefix);
+                return (col as u16, prefix);
             }
             seg_w = 0;
             limit = cont;
@@ -4186,7 +4242,7 @@ fn wrap_seg_offset(content: &[Cell], seg: usize, cw: u16, prefix: u16) -> (u16, 
         }
     }
     // `seg` past the last segment: clamp to the end of the content.
-    (col.min(u16::MAX as u32) as u16, prefix)
+    (col as u16, prefix)
 }
 
 /// Document rows to pin at the top of the body for a given `scroll`: the commit
@@ -4836,6 +4892,20 @@ mod tests {
         // line 1; at cw=6 it fits on one line.
         assert_eq!(wrap_seg_count(&text_cells("aaaa界"), 5, 0), 2);
         assert_eq!(wrap_seg_count(&text_cells("aaaa界"), 6, 0), 1);
+    }
+
+    #[test]
+    fn wrap_breaks_gives_segment_spans() {
+        use super::{text_cells, wrap_breaks};
+        // ASCII, cw=20: breaks at 20, 40, and the sentinel total (45).
+        assert_eq!(wrap_breaks(&text_cells(&"a".repeat(45)), 20, 0), vec![0, 20, 40, 45]);
+        // A wide grapheme moves to the next segment: `aaaa界bbbb` at cw=5 breaks
+        // at column 4 (the 界, which can't share segment 0's last column) and at
+        // 9, with the sentinel at the total width 10. Segment 1 is `[4, 9)` =
+        // 界 (2) + `bbb` (3) = 5 columns.
+        assert_eq!(wrap_breaks(&text_cells("aaaa界bbbb"), 5, 0), vec![0, 4, 9, 10]);
+        // A row that fits is a single segment: `[0, total)`.
+        assert_eq!(wrap_breaks(&text_cells("abc"), 20, 0), vec![0, 3]);
     }
 
     #[test]
