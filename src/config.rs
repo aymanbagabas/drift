@@ -26,6 +26,11 @@ pub struct Config {
     pub commit_meta: bool,
     /// Spaces per tab when rendering.
     pub tab_width: usize,
+    /// Wrap long lines instead of scrolling horizontally. Toggle at runtime
+    /// with `W`.
+    pub wrap: bool,
+    /// The glyph drawn at the start of each wrapped continuation line.
+    pub wrap_symbol: String,
     /// Sidebar visibility: "auto" (open when terminal >= 150 wide, default),
     /// "always" (open), or "never" (closed). The `b` key overrides at runtime.
     pub sidebar: String,
@@ -86,6 +91,8 @@ impl Default for Config {
             line_numbers: true,
             commit_meta: true,
             tab_width: 4,
+            wrap: false,
+            wrap_symbol: "↪".to_string(),
             sidebar: "auto".to_string(),
             sidebar_width: 30,
             sidebar_side: "left".to_string(),
@@ -175,6 +182,8 @@ impl Config {
                     "line-numbers" => self.line_numbers = parse_bool(val, self.line_numbers),
                     "commit-meta" => self.commit_meta = parse_bool(val, self.commit_meta),
                     "tab-width" => self.tab_width = val.parse().unwrap_or(self.tab_width),
+                    "wrap" => self.wrap = parse_bool(val, self.wrap),
+                    "wrap-symbol" => self.wrap_symbol = val.to_string(),
                     "sidebar" => self.sidebar = val.to_string(),
                     "sidebar-width" => {
                         self.sidebar_width = val.parse().unwrap_or(self.sidebar_width)

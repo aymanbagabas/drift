@@ -61,6 +61,15 @@ struct Cli {
     #[arg(long = "no-commit-meta")]
     no_commit_meta: bool,
 
+    /// Wrap long lines instead of scrolling horizontally. Toggle at runtime
+    /// with `W`.
+    #[arg(long)]
+    wrap: bool,
+
+    /// Force wrapping off for this run (overrides the config default).
+    #[arg(long = "no-wrap", conflicts_with = "wrap")]
+    no_wrap: bool,
+
     /// Ignore whitespace-only changes (git `-w`).
     #[arg(long = "ignore-whitespace")]
     ignore_whitespace: bool,
@@ -108,6 +117,12 @@ fn run() -> std::io::Result<()> {
     }
     if cli.no_commit_meta {
         cfg.commit_meta = false;
+    }
+    if cli.wrap {
+        cfg.wrap = true;
+    }
+    if cli.no_wrap {
+        cfg.wrap = false;
     }
 
     // Pager mode: a diff piped on stdin, with no explicit git selection.
