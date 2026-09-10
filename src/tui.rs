@@ -2437,7 +2437,7 @@ impl App {
                         self.view = View::Diff;
                     } else if k.matches("r") {
                         self.reload();
-                    } else if k.matches_any(["C", "Y"]) {
+                    } else if k.matches("C") {
                         self.yank_file()?;
                     }
                     return Ok(false);
@@ -2447,7 +2447,7 @@ impl App {
                 } else if k.matches("c") {
                     self.yank()?;
                     return Ok(false);
-                } else if k.matches_any(["C", "Y"]) {
+                } else if k.matches("C") {
                     self.yank_file()?;
                     return Ok(false);
                 }
@@ -2523,7 +2523,7 @@ impl App {
                         self.scroll = r;
                         self.scroll_seg = s;
                     }
-                } else if k.matches_any(["w", "W"]) {
+                } else if k.matches("w") {
                     // Toggle line wrapping; horizontal scroll is meaningless
                     // while wrapping, so reset it. `scroll_seg` is only valid
                     // while wrapping, so reset it too: it must be 0 when wrapping
@@ -2565,7 +2565,7 @@ impl App {
                     }
                 } else if k.matches("?") {
                     self.help_open = !self.help_open;
-                } else if k.matches_any(["o", "v"]) {
+                } else if k.matches("o") {
                     self.open_editor()?;
                 } else if k.matches("enter") {
                     // Enter expands folded context on a hunk header, or the
