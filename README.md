@@ -250,8 +250,9 @@ line-numbers  = true        # old/new line-number gutter
 commit-meta   = true        # expand author/date/message; the commit line always shows for a single commit
 wrap          = false       # wrap long lines instead of scrolling horizontally (toggle with w)
 wrap-symbol   = "↪"         # glyph shown at the start of each wrapped continuation line
-expand-symbol = "▸"         # gutter glyph on a foldable header you can expand (hunk / collapsed commit line)
-collapse-symbol = "▾"       # gutter glyph on an expanded header you can collapse (the commit line)
+expand-symbol = "›"         # gutter glyph on the collapsed commit line (expand to show metadata)
+collapse-symbol = "⌄"       # gutter glyph on the expanded commit line (collapse to hide metadata)
+context-symbol = "⋯"        # gutter glyph on a hunk header (reveal more context)
 tab-width     = 4
 editor        = ""          # falls back to $VISUAL, then $EDITOR, then vi
 sidebar       = "auto"      # "auto" (opens at width >= 150), "always", or "never"

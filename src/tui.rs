@@ -3905,7 +3905,7 @@ impl App {
                 // (in a repo source). Skip it in pager mode, where there's no
                 // repo to expand against.
                 if seg == 0 && num_w >= 2 && !matches!(self.source, Source::Stdin) {
-                    let g = self.config.expand_symbol.clone();
+                    let g = self.config.context_symbol.clone();
                     self.program.screen_mut()
                         .set_str((x + num_w - 2, y), &g, bg(self.theme.line_number.clone()));
                 }
