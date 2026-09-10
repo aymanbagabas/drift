@@ -62,7 +62,7 @@ struct Cli {
     no_commit_meta: bool,
 
     /// Wrap long lines instead of scrolling horizontally. Toggle at runtime
-    /// with `W`.
+    /// with `w`.
     #[arg(long)]
     wrap: bool,
 

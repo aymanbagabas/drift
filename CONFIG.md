@@ -27,10 +27,10 @@ surfaces instead of silently doing nothing.
 | `intraline` | bool | `true` | Word-level change emphasis. Always off under `ansi`. |
 | `line-numbers` | bool | `true` | Show old/new line-number gutter. |
 | `tab-width` | int | `4` | Spaces per tab when rendering. |
-| `sidebar` | string | `auto` | File-list sidebar: `auto` (open when terminal ≥ 150 wide), `always`, or `never`. The `b` key overrides at runtime. |
+| `sidebar` | string | `auto` | File-list sidebar: `auto` (open when terminal ≥ 150 wide), `always`, or `never`. The `B` key overrides at runtime. |
 | `sidebar-width` | int | `30` | Sidebar width in cells (including divider). Drag the divider to override at runtime. |
 | `sidebar-side` | string | `left` | Which side the sidebar sits on: `left` or `right`. |
-| `editor` | string | *(empty)* | Editor command for the `e` key. Empty falls back to `$VISUAL`, then `$EDITOR`, then `vi`. |
+| `editor` | string | *(empty)* | Editor command for the `o` key. Empty falls back to `$VISUAL`, then `$EDITOR`, then `vi`. |
 
 ### TOML example
 

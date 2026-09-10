@@ -27,7 +27,7 @@ pub struct Config {
     /// Spaces per tab when rendering.
     pub tab_width: usize,
     /// Wrap long lines instead of scrolling horizontally. Toggle at runtime
-    /// with `W`.
+    /// with `w`.
     pub wrap: bool,
     /// The glyph drawn at the start of each wrapped continuation line.
     pub wrap_symbol: String,
