@@ -3905,7 +3905,10 @@ impl App {
                 // (in a repo source). Skip it in pager mode, where there's no
                 // repo to expand against.
                 if seg == 0 && num_w >= 2 && !matches!(self.source, Source::Stdin) {
-                    let g = self.config.context_symbol.clone();
+                    // Clip a custom symbol to the two gutter cells before the
+                    // header text so a wide value can't overwrite it.
+                    let sym = self.config.context_symbol.clone();
+                    let (g, _) = self.slice_h(&sym, 0, 2);
                     self.program.screen_mut()
                         .set_str((x + num_w - 2, y), &g, bg(self.theme.line_number.clone()));
                 }
@@ -3916,13 +3919,16 @@ impl App {
             }
             RowKind::CommitLine => {
                 // Gutter symbol: the commit line folds its metadata. Only when
-                // there is metadata to show; `▾` while expanded, `▸` collapsed.
+                // there is metadata to show; the expanded state shows the
+                // collapse symbol, the collapsed state the expand symbol.
                 if seg == 0 && num_w >= 2 && self.commit_meta.len() > 1 {
-                    let g = if self.show_meta {
+                    let sym = if self.show_meta {
                         self.config.collapse_symbol.clone()
                     } else {
                         self.config.expand_symbol.clone()
                     };
+                    // Clip to the two gutter cells before the header text.
+                    let (g, _) = self.slice_h(&sym, 0, 2);
                     self.program.screen_mut()
                         .set_str((x + num_w - 2, y), &g, bg(self.theme.line_number.clone()));
                 }
