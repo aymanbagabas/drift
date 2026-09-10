@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use regex::{Regex, RegexBuilder};
 
+use uncurses::ansi::mode::Mode;
 use uncurses::buffer::{Bounded, Line, SurfaceMut};
 use uncurses::cell::Cell;
 use uncurses::color::Color;
@@ -836,12 +837,14 @@ pub struct App {
     mascot_pinned: bool,
     /// Timestamps of recent Esc taps, for detecting the triple-tap toggle.
     esc_taps: (u8, Option<Instant>),
-    /// Symbols, measured/clipped once at startup. Config is read once (drift
-    /// has no runtime reload) and terminal width policy is fixed, so these
-    /// never change — computing them per frame would re-measure graphemes on
-    /// hot paths (`wrap_sym_w` feeds every row's height and wrap math).
-    /// `wrap_sym_w` is the wrap symbol's display width; the fold symbols are
-    /// pre-clipped to the two gutter cells they draw into.
+    /// Symbols, measured/clipped once and re-measured only when the terminal's
+    /// width policy changes. Config is read once (drift has no runtime reload),
+    /// so the only thing that moves them is the terminal adopting
+    /// grapheme-cluster mode (DEC 2027) after startup — handled in `handle`.
+    /// Measuring per frame would re-run grapheme measurement on hot paths
+    /// (`wrap_sym_w` feeds every row's height and wrap math). `wrap_sym_w` is
+    /// the wrap symbol's display width; the fold symbols are pre-clipped to the
+    /// two gutter cells they draw into.
     wrap_sym_w: u16,
     expand_sym: String,
     collapse_sym: String,
@@ -902,13 +905,6 @@ impl App {
         let toplevel = crate::git::toplevel();
         let title_dir = toplevel.as_deref().map(abbrev_home);
         let wrap = config.wrap;
-        // Measure the symbols once: config is read only at startup and the
-        // screen's width policy is fixed, so these are constant for the run.
-        let wrap_sym_w = program.screen().str_width(&config.wrap_symbol).max(1);
-        let clip2 = |s: &str| slice_fit(program.screen().grapheme_cells(s), 0, 2).0;
-        let expand_sym = clip2(&config.expand_symbol);
-        let collapse_sym = clip2(&config.collapse_symbol);
-        let context_sym = clip2(&config.context_symbol);
         let mut app = App {
             program,
             config,
@@ -965,11 +961,14 @@ impl App {
             mascot_grab: None,
             mascot_pinned: false,
             esc_taps: (0, None),
-            wrap_sym_w,
-            expand_sym,
-            collapse_sym,
-            context_sym,
+            wrap_sym_w: 1,
+            expand_sym: String::new(),
+            collapse_sym: String::new(),
+            context_sym: String::new(),
         };
+        // Measure the symbols against the current width policy. Re-run later if
+        // the terminal adopts grapheme-cluster mode (DEC 2027) mid-session.
+        app.refresh_symbols();
         app.start();
         Ok(Some(app))
     }
@@ -1625,6 +1624,17 @@ impl App {
         }
         let body = self.program.screen().width().saturating_sub(self.sidebar_w());
         self.wrap_width(body, Gut::Both)
+    }
+
+    /// Measure and clip the configured symbols against the screen's current
+    /// width policy, caching the result. Called once at startup and again if
+    /// the terminal adopts grapheme-cluster mode (DEC 2027) after startup,
+    /// which can change how a multi-codepoint symbol measures.
+    fn refresh_symbols(&mut self) {
+        self.wrap_sym_w = self.width(&self.config.wrap_symbol).max(1);
+        self.expand_sym = self.slice_h(&self.config.expand_symbol, 0, 2).0;
+        self.collapse_sym = self.slice_h(&self.config.collapse_symbol, 0, 2).0;
+        self.context_sym = self.slice_h(&self.config.context_symbol, 0, 2).0;
     }
 
     /// Break-indent width for a row: the display width of its leading spaces,
@@ -2793,6 +2803,12 @@ impl App {
                 self.move_cursor(0);
                 self.scroll_h(0);
             }
+            // The terminal can adopt grapheme-cluster mode (DEC 2027) after
+            // startup; try_read_event's observe_event has already flipped the
+            // screen's width policy by the time this arrives. That changes how a
+            // multi-codepoint symbol measures, so re-measure the cached symbols
+            // against the now-current policy.
+            Event::ModeReport { mode: Mode::UNICODE_CORE, .. } => self.refresh_symbols(),
             _ => {}
         }
         Ok(false)
