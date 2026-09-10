@@ -721,7 +721,7 @@ pub struct App {
     /// seeded from `config.commit_meta`.
     show_meta: bool,
     /// The raw unified-diff text for each file, in the same order as `files`,
-    /// so `Y` can copy an exact per-file patch without reconstructing it.
+    /// so `C` can copy an exact per-file patch without reconstructing it.
     raw_files: Vec<String>,
     /// The whole diff as one continuous document: every file's rows
     /// concatenated, each preceded by a `RowKind::File` header. `file_starts[i]`
@@ -792,7 +792,7 @@ pub struct App {
     last_click: Option<(Instant, u16, u16)>,
     /// Side-by-side (split) diff rendering, toggled with `s`.
     split: bool,
-    /// Wrap long lines instead of scrolling horizontally, toggled with `W`.
+    /// Wrap long lines instead of scrolling horizontally, toggled with `w`.
     /// Seeded from `config.wrap`.
     wrap: bool,
     /// Left pane's fraction of the split body (drag the divider to change it).
@@ -1532,7 +1532,7 @@ impl App {
             ("0/$", "line start/end"),
             ("d/u", "half page"),
             ("f/b", "full page"),
-            ("^e/^y", "scroll one line"),
+            ("e/y", "scroll one line"),
             ("g/G", "top/bottom"),
             ("H/M/L", "screen top/mid/low"),
             ("{ }", "prev/next hunk"),
@@ -1541,16 +1541,16 @@ impl App {
             ("/", "search"),
             ("n/N", "next/prev match"),
             ("s", "split view"),
-            ("W", "wrap lines"),
-            ("F", "files"),
+            ("w", "wrap lines"),
+            ("S", "file stats"),
             ("B", "sidebar"),
-            ("w", "watch on/off"),
+            ("F", "watch on/off"),
             ("a", "untracked on/off"),
             ("enter", "expand context / commit info"),
-            ("v", "edit in $EDITOR"),
-            ("y", "copy line/selection"),
+            ("o", "open in $EDITOR"),
+            ("c", "copy line/selection"),
             ("V", "select lines"),
-            ("Y", "copy file diff"),
+            ("C", "copy file diff"),
             ("r", "refresh"),
             ("?", "toggle help"),
             ("q", "quit"),
@@ -1559,7 +1559,7 @@ impl App {
         .filter(|(k, _)| {
             if piped {
                 // Repo-driven affordances are inert on a static piped diff.
-                if matches!(*k, "w" | "a" | "r") {
+                if matches!(*k, "F" | "a" | "r") {
                     return false;
                 }
                 // `enter` expands context (inert when piped) but also toggles
@@ -2429,25 +2429,25 @@ impl App {
                         self.select_file_at(0);
                     } else if k.matches_any(["G", "end"]) {
                         self.select_file_at(self.files.len().saturating_sub(1));
-                    } else if k.matches_any(["F", "tab"]) {
+                    } else if k.matches_any(["S", "tab"]) {
                         self.view = View::Diff;
                     } else if k.matches("?") {
                         self.help_open = !self.help_open;
-                    } else if k.matches_any(["enter", "v"]) {
+                    } else if k.matches("enter") {
                         self.view = View::Diff;
                     } else if k.matches("r") {
                         self.reload();
-                    } else if k.matches("Y") {
+                    } else if k.matches_any(["C", "Y"]) {
                         self.yank_file()?;
                     }
                     return Ok(false);
                 }
                 if k.matches_any(["q", "ctrl+c"]) {
                     return Ok(true);
-                } else if k.matches("y") {
+                } else if k.matches("c") {
                     self.yank()?;
                     return Ok(false);
-                } else if k.matches("Y") {
+                } else if k.matches_any(["C", "Y"]) {
                     self.yank_file()?;
                     return Ok(false);
                 }
@@ -2477,9 +2477,9 @@ impl App {
                     self.scroll_page(page);
                 } else if k.matches_any(["ctrl+b", "b", "pageup"]) {
                     self.scroll_page(-page);
-                } else if k.matches("ctrl+e") {
+                } else if k.matches_any(["e", "ctrl+e"]) {
                     self.scroll_page(1);
-                } else if k.matches("ctrl+y") {
+                } else if k.matches_any(["y", "ctrl+y"]) {
                     self.scroll_page(-1);
                 } else if k.matches_any(["g", "home"]) {
                     self.cursor_to(0);
@@ -2523,7 +2523,7 @@ impl App {
                         self.scroll = r;
                         self.scroll_seg = s;
                     }
-                } else if k.matches("W") {
+                } else if k.matches_any(["w", "W"]) {
                     // Toggle line wrapping; horizontal scroll is meaningless
                     // while wrapping, so reset it. `scroll_seg` is only valid
                     // while wrapping, so reset it too: it must be 0 when wrapping
@@ -2538,13 +2538,13 @@ impl App {
                     let (r, s) = self.clamp_scroll_pos(self.scroll, self.scroll_seg);
                     self.scroll = r;
                     self.scroll_seg = s;
-                } else if k.matches("F") {
+                } else if k.matches("S") {
                     self.view = View::Stat;
                 } else if k.matches("B") {
                     self.sidebar = Some(!self.sidebar_visible());
-                } else if k.matches("w") {
-                    // Watch needs a live repo; a piped diff (pager mode) is
-                    // static, so leave it a no-op there.
+                } else if k.matches("F") {
+                    // Watch (follow, like `less`) needs a live repo; a piped diff
+                    // (pager mode) is static, so leave it a no-op there.
                     if !matches!(self.source, Source::Stdin) {
                         self.watch = !self.watch;
                         // Turning watch on catches up on anything that changed
@@ -2565,12 +2565,12 @@ impl App {
                     }
                 } else if k.matches("?") {
                     self.help_open = !self.help_open;
-                } else if k.matches("v") {
+                } else if k.matches_any(["o", "v"]) {
                     self.open_editor()?;
                 } else if k.matches("enter") {
                     // Enter expands folded context on a hunk header, or the
                     // commit metadata on the commit line; it no longer opens
-                    // the editor (use `v` for that).
+                    // the editor (use `o` for that).
                     if self.on_commit_line() {
                         self.toggle_meta();
                     } else if self.on_hunk() && !matches!(self.source, Source::Stdin) {
@@ -3255,7 +3255,7 @@ impl App {
             .set_str((help_x, row), help_badge, self.theme.statusbar_help.clone());
 
         let w_x = if self.watch {
-            let w_badge = " W ";
+            let w_badge = " F ";
             let wx = help_x.saturating_sub(self.width(w_badge));
             self.program.screen_mut()
                 .set_str((wx, row), w_badge, self.theme.statusbar_watch.clone());

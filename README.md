@@ -117,7 +117,7 @@ git diff | drift          # pager mode: read a diff from stdin
 ```
 
 > [!TIP]
-> Pair it with an AI agent. Leave `drift -w` open in a split while an agent (Copilot, Claude, etc.) works, every edit lands on screen instantly. Press <kbd>w</kbd> to freeze the view when you want to read, and again to resume.
+> Pair it with an AI agent. Leave `drift -w` open in a split while an agent (Copilot, Claude, etc.) works, every edit lands on screen instantly. Press <kbd>F</kbd> to freeze the view when you want to read, and again to resume.
 
 Make it your default git diff pager:
 
@@ -157,7 +157,7 @@ Some flags worth knowing:
 | `0` `$` | Scroll to line start / end |
 | `d` `u` / `^d` `^u` | Half page down / up |
 | `space` `f` `^f` / `b` `^b` | Full page down / up |
-| `^e` `^y` | Scroll one line down / up |
+| `e` `y` / `^e` `^y` | Scroll one line down / up |
 | `g` `G` | Top / bottom |
 | `H` `M` `L` | Cursor to screen top / middle / bottom |
 | `{` `}` | Previous / next hunk |
@@ -165,15 +165,16 @@ Some flags worth knowing:
 | `/` | Search the current file (regex, smart-case) |
 | `n` `N` | Next / previous match |
 | `s` | Toggle split view |
-| `W` | Toggle line wrapping (long lines wrap instead of scrolling horizontally) |
-| `F` | File list modal |
+| `w` | Toggle line wrapping (long lines wrap instead of scrolling horizontally) |
+| `S` | File stats modal |
 | `B` | Toggle the file sidebar |
-| `w` | Toggle watch mode |
+| `F` | Toggle watch mode (follow changes, like `less`) |
+| `a` | Toggle untracked files (worktree view) |
 | `V` | Start / cancel a line selection; any motion key extends it |
-| `y` | Copy the selection, or the cursor line when nothing is selected |
-| `Y` | Copy the whole current file |
+| `c` | Copy the selection, or the cursor line when nothing is selected |
+| `C` | Copy the whole current file |
 | `enter` | On a hunk header, expand folded context; on the commit line, expand / collapse the commit metadata |
-| `v` | Open the current file in `$EDITOR` |
+| `o` | Open the current file in `$EDITOR` |
 | `r` | Refresh |
 | `?` | Toggle the help footer |
 | `q` | Quit |
