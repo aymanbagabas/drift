@@ -48,8 +48,8 @@ Type "s" Sleep 800ms
 Type "B" Sleep 1.4s
 Type "B" Sleep 800ms
 
-# file-list modal: pick a different file and jump to it
-Type "F" Sleep 1.2s
+# file stats modal: pick a different file and jump to it
+Type "S" Sleep 1.2s
 Up@300ms 1
 Sleep 900ms
 Enter Sleep 1.6s
