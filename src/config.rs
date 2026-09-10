@@ -29,15 +29,15 @@ pub struct Config {
     /// Wrap long lines instead of scrolling horizontally. Toggle at runtime
     /// with `w`.
     pub wrap: bool,
-    /// The glyph drawn at the start of each wrapped continuation line.
+    /// The symbol drawn at the start of each wrapped continuation line.
     pub wrap_symbol: String,
-    /// Gutter glyph on the collapsed commit line, which you can expand to show
+    /// Gutter symbol on the collapsed commit line, which you can expand to show
     /// its metadata.
     pub expand_symbol: String,
-    /// Gutter glyph on the expanded commit line, which you can collapse to hide
+    /// Gutter symbol on the expanded commit line, which you can collapse to hide
     /// its metadata.
     pub collapse_symbol: String,
-    /// Gutter glyph on a hunk header, marking context you can reveal.
+    /// Gutter symbol on a hunk header, marking context you can reveal.
     pub context_symbol: String,
     /// Sidebar visibility: "auto" (open when terminal >= 150 wide, default),
     /// "always" (open), or "never" (closed). The `b` key overrides at runtime.

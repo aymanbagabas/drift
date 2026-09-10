@@ -1606,15 +1606,15 @@ impl App {
         self.wrap_width(body, Gut::Both)
     }
 
-    /// Display width of the wrap glyph (usually 1).
-    fn wrap_glyph_w(&self) -> u16 {
+    /// Display width of the wrap symbol (usually 1).
+    fn wrap_symbol_w(&self) -> u16 {
         self.width(&self.config.wrap_symbol).max(1)
     }
 
     /// Break-indent width for a row: the display width of its leading spaces,
     /// capped so a continuation line still keeps a few content columns after
-    /// the indent, the wrap glyph, and its trailing space. The `+ 5` reserves
-    /// the glyph width plus five columns: one for the trailing space and four
+    /// the indent, the wrap symbol, and its trailing space. The `+ 5` reserves
+    /// the symbol width plus five columns: one for the trailing space and four
     /// as a minimum of visible content. Tabs were already expanded to spaces
     /// for content rows.
     fn wrap_indent_width(&self, r: &Row, cw: u16) -> u16 {
@@ -1624,18 +1624,18 @@ impl App {
             .flat_map(|s| s.text.chars())
             .take_while(|c| *c == ' ')
             .count() as u16;
-        n.min(cw.saturating_sub(self.wrap_glyph_w() + 5))
+        n.min(cw.saturating_sub(self.wrap_symbol_w() + 5))
     }
 
     /// How far a continuation line's content is pushed right: the break-indent,
-    /// then the wrap glyph and one space (which prefix the wrapped content).
+    /// then the wrap symbol and one space (which prefix the wrapped content).
     fn wrap_prefix_width(&self, r: &Row, cw: u16) -> u16 {
         // Cap so a continuation keeps at least two content columns — enough for
         // one wide (2-cell) grapheme. Otherwise an ultra-narrow pane could give
         // a continuation a single usable column, and a wide cluster placed there
         // would be dropped by the renderer (`slice_fit` can't emit half a
         // cluster). Rendering and mapping both read this, so they stay in step.
-        (self.wrap_indent_width(r, cw) + self.wrap_glyph_w() + 1).min(cw.saturating_sub(2))
+        (self.wrap_indent_width(r, cw) + self.wrap_symbol_w() + 1).min(cw.saturating_sub(2))
     }
 
     /// Visual height (wrapped segments) of a row in the current layout. In split
@@ -3901,7 +3901,7 @@ impl App {
                 return;
             }
             RowKind::Hunk => {
-                // Gutter glyph: a hunk header can always reveal more context
+                // Gutter symbol: a hunk header can always reveal more context
                 // (in a repo source). Skip it in pager mode, where there's no
                 // repo to expand against.
                 if seg == 0 && num_w >= 2 && !matches!(self.source, Source::Stdin) {
@@ -3915,7 +3915,7 @@ impl App {
                 return;
             }
             RowKind::CommitLine => {
-                // Gutter glyph: the commit line folds its metadata. Only when
+                // Gutter symbol: the commit line folds its metadata. Only when
                 // there is metadata to show; `▾` while expanded, `▸` collapsed.
                 if seg == 0 && num_w >= 2 && self.commit_meta.len() > 1 {
                     let g = if self.show_meta {
@@ -3951,7 +3951,7 @@ impl App {
         if seg == 0 {
             self.program.screen_mut().set_str((cx, y), sign, bg(sign_style));
         }
-        // Continuation segments leave the sign column blank; the wrap glyph is
+        // Continuation segments leave the sign column blank; the wrap symbol is
         // drawn as the first indented content char below.
         cx += 1;
 
@@ -3965,7 +3965,7 @@ impl App {
         // Wrapping draws segment `seg` by offsetting the content by whole
         // segment widths, reusing the horizontal-scroll machinery. Continuation
         // segments are indented to match the line's leading whitespace and
-        // prefixed with the wrap glyph and a space (break-indent). Off, it's the
+        // prefixed with the wrap symbol and a space (break-indent). Off, it's the
         // live horizontal scroll.
         let cw = avail.saturating_sub(content_origin);
         // `cw == 0` means the pane is too narrow for any content (all gutter and
@@ -3976,15 +3976,15 @@ impl App {
             let prefix = self.wrap_prefix_width(r, cw);
             let (col_off, draw_indent) = wrap_seg_offset(&r.content, seg, cw, prefix);
             if seg > 0 {
-                // The wrap glyph is the first char of the continuation line, at
+                // The wrap symbol is the first char of the continuation line, at
                 // the break-indent, in the line-number grey, with a space after
                 // it before the wrapped content resumes. Only draw it when the
                 // reserved prefix actually leaves room: on ultra-narrow panes
-                // `wrap_prefix_width` clamps the prefix so tight that the glyph
+                // `wrap_prefix_width` clamps the prefix so tight that the symbol
                 // would overwrite the first content cell (and desync the
                 // input-mapping/highlighting, which key off `prefix`).
                 let indent = self.wrap_indent_width(r, cw);
-                if indent + self.wrap_glyph_w() <= prefix {
+                if indent + self.wrap_symbol_w() <= prefix {
                     let st = bg(self.theme.line_number.clone());
                     self.program.screen_mut().set_str(
                         (content_origin + indent, y),
@@ -4233,7 +4233,7 @@ fn wrap_breaks(content: &[Cell], cw: u16, prefix: u16) -> Vec<u16> {
 /// first display column of content the segment shows (aligned to a
 /// grapheme-cluster boundary) and how far past the content origin it is drawn.
 /// Segment 0 starts at column 0 with no indent; each continuation is indented
-/// by `prefix` (the break-indent plus the wrap glyph and its trailing space).
+/// by `prefix` (the break-indent plus the wrap symbol and its trailing space).
 fn wrap_seg_offset(content: &[Cell], seg: usize, cw: u16, prefix: u16) -> (u16, u16) {
     if seg == 0 || cw == 0 {
         return (0, 0);
