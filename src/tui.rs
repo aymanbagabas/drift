@@ -836,6 +836,16 @@ pub struct App {
     mascot_pinned: bool,
     /// Timestamps of recent Esc taps, for detecting the triple-tap toggle.
     esc_taps: (u8, Option<Instant>),
+    /// Symbols, measured/clipped once at startup. Config is read once (drift
+    /// has no runtime reload) and terminal width policy is fixed, so these
+    /// never change — computing them per frame would re-measure graphemes on
+    /// hot paths (`wrap_sym_w` feeds every row's height and wrap math).
+    /// `wrap_sym_w` is the wrap symbol's display width; the fold symbols are
+    /// pre-clipped to the two gutter cells they draw into.
+    wrap_sym_w: u16,
+    expand_sym: String,
+    collapse_sym: String,
+    context_sym: String,
 }
 
 impl App {
@@ -892,6 +902,13 @@ impl App {
         let toplevel = crate::git::toplevel();
         let title_dir = toplevel.as_deref().map(abbrev_home);
         let wrap = config.wrap;
+        // Measure the symbols once: config is read only at startup and the
+        // screen's width policy is fixed, so these are constant for the run.
+        let wrap_sym_w = program.screen().str_width(&config.wrap_symbol).max(1);
+        let clip2 = |s: &str| slice_fit(program.screen().grapheme_cells(s), 0, 2).0;
+        let expand_sym = clip2(&config.expand_symbol);
+        let collapse_sym = clip2(&config.collapse_symbol);
+        let context_sym = clip2(&config.context_symbol);
         let mut app = App {
             program,
             config,
@@ -948,6 +965,10 @@ impl App {
             mascot_grab: None,
             mascot_pinned: false,
             esc_taps: (0, None),
+            wrap_sym_w,
+            expand_sym,
+            collapse_sym,
+            context_sym,
         };
         app.start();
         Ok(Some(app))
@@ -1606,11 +1627,6 @@ impl App {
         self.wrap_width(body, Gut::Both)
     }
 
-    /// Display width of the wrap symbol (usually 1).
-    fn wrap_symbol_w(&self) -> u16 {
-        self.width(&self.config.wrap_symbol).max(1)
-    }
-
     /// Break-indent width for a row: the display width of its leading spaces,
     /// capped so a continuation line still keeps a few content columns after
     /// the indent, the wrap symbol, and its trailing space. The `+ 5` reserves
@@ -1624,7 +1640,7 @@ impl App {
             .flat_map(|s| s.text.chars())
             .take_while(|c| *c == ' ')
             .count() as u16;
-        n.min(cw.saturating_sub(self.wrap_symbol_w() + 5))
+        n.min(cw.saturating_sub(self.wrap_sym_w + 5))
     }
 
     /// How far a continuation line's content is pushed right: the break-indent,
@@ -1635,7 +1651,7 @@ impl App {
         // a continuation a single usable column, and a wide cluster placed there
         // would be dropped by the renderer (`slice_fit` can't emit half a
         // cluster). Rendering and mapping both read this, so they stay in step.
-        (self.wrap_indent_width(r, cw) + self.wrap_symbol_w() + 1).min(cw.saturating_sub(2))
+        (self.wrap_indent_width(r, cw) + self.wrap_sym_w + 1).min(cw.saturating_sub(2))
     }
 
     /// Visual height (wrapped segments) of a row in the current layout. In split
@@ -3905,12 +3921,10 @@ impl App {
                 // (in a repo source). Skip it in pager mode, where there's no
                 // repo to expand against.
                 if seg == 0 && num_w >= 2 && !matches!(self.source, Source::Stdin) {
-                    // Clip a custom symbol to the two gutter cells before the
-                    // header text so a wide value can't overwrite it.
-                    let sym = self.config.context_symbol.clone();
-                    let (g, _) = self.slice_h(&sym, 0, 2);
+                    // The symbol is pre-clipped to the two gutter cells at
+                    // startup so a wide custom value can't overwrite the header.
                     self.program.screen_mut()
-                        .set_str((x + num_w - 2, y), &g, bg(self.theme.line_number.clone()));
+                        .set_str((x + num_w - 2, y), &self.context_sym, bg(self.theme.line_number.clone()));
                 }
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.program.screen_mut()
@@ -3922,15 +3936,14 @@ impl App {
                 // there is metadata to show; the expanded state shows the
                 // collapse symbol, the collapsed state the expand symbol.
                 if seg == 0 && num_w >= 2 && self.commit_meta.len() > 1 {
+                    // Pre-clipped to the two gutter cells at startup.
                     let sym = if self.show_meta {
-                        self.config.collapse_symbol.clone()
+                        &self.collapse_sym
                     } else {
-                        self.config.expand_symbol.clone()
+                        &self.expand_sym
                     };
-                    // Clip to the two gutter cells before the header text.
-                    let (g, _) = self.slice_h(&sym, 0, 2);
                     self.program.screen_mut()
-                        .set_str((x + num_w - 2, y), &g, bg(self.theme.line_number.clone()));
+                        .set_str((x + num_w - 2, y), sym, bg(self.theme.line_number.clone()));
                 }
                 // The commit line, always shown and bold like the file header.
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
@@ -3990,7 +4003,7 @@ impl App {
                 // would overwrite the first content cell (and desync the
                 // input-mapping/highlighting, which key off `prefix`).
                 let indent = self.wrap_indent_width(r, cw);
-                if indent + self.wrap_symbol_w() <= prefix {
+                if indent + self.wrap_sym_w <= prefix {
                     let st = bg(self.theme.line_number.clone());
                     self.program.screen_mut().set_str(
                         (content_origin + indent, y),
