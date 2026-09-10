@@ -3901,12 +3901,31 @@ impl App {
                 return;
             }
             RowKind::Hunk => {
+                // Gutter glyph: a hunk header can always reveal more context
+                // (in a repo source). Skip it in pager mode, where there's no
+                // repo to expand against.
+                if seg == 0 && num_w >= 2 && !matches!(self.source, Source::Stdin) {
+                    let g = self.config.expand_symbol.clone();
+                    self.program.screen_mut()
+                        .set_str((x + num_w - 2, y), &g, bg(self.theme.line_number.clone()));
+                }
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.program.screen_mut()
                     .set_str((cx, y), &s, bg(self.theme.header.clone()));
                 return;
             }
             RowKind::CommitLine => {
+                // Gutter glyph: the commit line folds its metadata. Only when
+                // there is metadata to show; `▾` while expanded, `▸` collapsed.
+                if seg == 0 && num_w >= 2 && self.commit_meta.len() > 1 {
+                    let g = if self.show_meta {
+                        self.config.collapse_symbol.clone()
+                    } else {
+                        self.config.expand_symbol.clone()
+                    };
+                    self.program.screen_mut()
+                        .set_str((x + num_w - 2, y), &g, bg(self.theme.line_number.clone()));
+                }
                 // The commit line, always shown and bold like the file header.
                 let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
                 self.program.screen_mut()
