@@ -810,12 +810,12 @@ pub struct App {
     modal_drag: Option<(u16, u16)>,
     /// Last window title pushed to the terminal, to avoid redundant writes.
     title: String,
-    /// Whether watch mode reacts to git changes (toggle with `w`).
+    /// Whether watch mode reacts to git changes (toggle with `F`).
     watch: bool,
     /// Extra lines of context added on top of the base setting, grown by
     /// expanding folded regions with Enter on a hunk header.
     expand: usize,
-    /// Active text selection, drawn reversed and yanked with `y`.
+    /// Active text selection, drawn reversed and yanked with `c`.
     sel: Option<Sel>,
     /// Anchor row of a keyboard visual-line selection (`V`), or `None` when
     /// visual mode is off. While set, cursor movement extends `sel` instead of
@@ -2863,7 +2863,7 @@ impl App {
     ///
     /// Line-wise (not character-wise) because a diff row is only ever copied as
     /// a whole line: the gutter, +/- sign, and split panes make a character
-    /// anchor ambiguous, and `y` already yanks whole rows.
+    /// anchor ambiguous, and `c` already yanks whole rows.
     fn toggle_visual(&mut self) {
         if self.visual.take().is_some() {
             self.sel = None;
