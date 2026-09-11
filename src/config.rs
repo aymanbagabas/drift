@@ -29,8 +29,16 @@ pub struct Config {
     /// Wrap long lines instead of scrolling horizontally. Toggle at runtime
     /// with `w`.
     pub wrap: bool,
-    /// The glyph drawn at the start of each wrapped continuation line.
+    /// The symbol drawn at the start of each wrapped continuation line.
     pub wrap_symbol: String,
+    /// Gutter symbol on the collapsed commit line, which you can expand to show
+    /// its metadata.
+    pub expand_symbol: String,
+    /// Gutter symbol on the expanded commit line, which you can collapse to hide
+    /// its metadata.
+    pub collapse_symbol: String,
+    /// Gutter symbol on a hunk header, marking context you can reveal.
+    pub context_symbol: String,
     /// Sidebar visibility: "auto" (open when terminal >= 150 wide, default),
     /// "always" (open), or "never" (closed). The `b` key overrides at runtime.
     pub sidebar: String,
@@ -93,6 +101,9 @@ impl Default for Config {
             tab_width: 4,
             wrap: false,
             wrap_symbol: "↪".to_string(),
+            expand_symbol: "›".to_string(),
+            collapse_symbol: "⌄".to_string(),
+            context_symbol: "⋯".to_string(),
             sidebar: "auto".to_string(),
             sidebar_width: 30,
             sidebar_side: "left".to_string(),
@@ -184,6 +195,9 @@ impl Config {
                     "tab-width" => self.tab_width = val.parse().unwrap_or(self.tab_width),
                     "wrap" => self.wrap = parse_bool(val, self.wrap),
                     "wrap-symbol" => self.wrap_symbol = val.to_string(),
+                    "expand-symbol" => self.expand_symbol = val.to_string(),
+                    "collapse-symbol" => self.collapse_symbol = val.to_string(),
+                    "context-symbol" => self.context_symbol = val.to_string(),
                     "sidebar" => self.sidebar = val.to_string(),
                     "sidebar-width" => {
                         self.sidebar_width = val.parse().unwrap_or(self.sidebar_width)

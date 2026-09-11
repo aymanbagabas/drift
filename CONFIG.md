@@ -27,6 +27,10 @@ surfaces instead of silently doing nothing.
 | `intraline` | bool | `true` | Word-level change emphasis. Always off under `ansi`. |
 | `line-numbers` | bool | `true` | Show old/new line-number gutter. |
 | `tab-width` | int | `4` | Spaces per tab when rendering. |
+| `wrap-symbol` | string | `↪` | Symbol at the start of each wrapped continuation line. |
+| `expand-symbol` | string | `›` | Gutter symbol on the collapsed commit line (expand to show its metadata). |
+| `collapse-symbol` | string | `⌄` | Gutter symbol on the expanded commit line (collapse to hide its metadata). |
+| `context-symbol` | string | `⋯` | Gutter symbol on a hunk header (reveal more context). |
 | `sidebar` | string | `auto` | File-list sidebar: `auto` (open when terminal ≥ 150 wide), `always`, or `never`. The `B` key overrides at runtime. |
 | `sidebar-width` | int | `30` | Sidebar width in cells (including divider). Drag the divider to override at runtime. |
 | `sidebar-side` | string | `left` | Which side the sidebar sits on: `left` or `right`. |
