@@ -34,9 +34,14 @@ builds:
   - id: cross
     builder: rust
     binary: drift
+    # Linux ships as static musl binaries, not glibc: a glibc build only runs on
+    # a glibc at least as new as the build host's (zig defaults to a recent one),
+    # which broke drift on older enterprise distros (issue #22). Static musl has
+    # no libc floor and runs everywhere, incl. Alpine. mimalloc (see Cargo.toml)
+    # offsets musl's slower allocator. Windows stays gnu (mingw), unaffected.
     targets:
-      - x86_64-unknown-linux-gnu
-      - aarch64-unknown-linux-gnu
+      - x86_64-unknown-linux-musl
+      - aarch64-unknown-linux-musl
       - x86_64-pc-windows-gnu
     flags:
       - --release
