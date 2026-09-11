@@ -16,6 +16,13 @@ use clap::Parser;
 use config::Config;
 use git::Source;
 
+// mimalloc cuts CPU time and peak memory when highlighting large diffs, most of
+// all on the static musl release binary. Off on Windows only: its C sources do
+// not cross-compile under the windows-gnu (zig) release toolchain (see Cargo.toml).
+#[cfg(not(target_os = "windows"))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// A standalone git diff pager: browse commit, staged, or working-tree diffs
 /// in a TUI with syntax highlighting, intra-line changes, and live refresh.
 #[derive(Parser, Debug)]

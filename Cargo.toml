@@ -27,6 +27,14 @@ toml = "1"
 two-face = { version = "0.5.1", default-features = false, features = ["syntect-fancy"] }
 regex = "1.13.0"
 
+# mimalloc replaces the system allocator on every target except Windows. It
+# markedly cuts CPU time and peak memory when highlighting large diffs, most of
+# all on musl (whose default allocator is slower and holds more memory). It is
+# excluded on Windows only because its C sources do not cross-compile under the
+# windows-gnu (zig) release toolchain.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 [profile.release]
 opt-level = "z"
 lto = true
@@ -37,8 +45,9 @@ panic = "abort"
 # `cargo binstall` reuses the GoReleaser release archives. Their names mirror
 # the GoReleaser `archives.name_template` (drift_<version>_<os>_<arch>.<ext>),
 # which uses Go-style os/arch rather than Rust target triples, so each target is
-# mapped explicitly. Targets with no entry (musl, 32-bit, ...) have no published
-# binary and fall back to building from source.
+# mapped explicitly. The Linux archives ship a static musl binary, so it is
+# mapped for both the -gnu and -musl host targets (a static binary runs on
+# either). Targets with no entry (32-bit, ...) fall back to building from source.
 [package.metadata.binstall]
 bin-dir = "{ bin }{ binary-ext }"
 
@@ -52,6 +61,12 @@ pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_darwin_arm6
 pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_linux_amd64.tar.gz"
 
 [package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_linux_arm64.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_linux_amd64.tar.gz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
 pkg-url = "{ repo }/releases/download/v{ version }/drift_{ version }_linux_arm64.tar.gz"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
