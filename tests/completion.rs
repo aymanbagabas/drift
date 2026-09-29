@@ -116,6 +116,14 @@ fn completes_flags_values_paths_and_revisions() {
     assert_eq!(fish(&["-C", other_dir, "else"]), ["elsewhere"]);
     assert_eq!(fish(&["--directory", other_dir, "--", "oth"]), ["other.txt"]);
     let _ = std::fs::remove_dir_all(&other);
+    // drift fails if it can't enter DIR, so nothing completes. The words
+    // must not come from the directory drift started in.
+    let missing = dir.join("missing");
+    let missing = missing.to_str().unwrap();
+    for words in [&["-C", missing, "fe"][..], &["--directory", missing, "--", "tr"]] {
+        let got = fish(words);
+        assert!(got.is_empty(), "{words:?}: {got:?}");
+    }
 
     // Only `DRIFT_COMPLETE` starts completion, not an unrelated `COMPLETE`.
     let out = Command::new(env!("CARGO_BIN_EXE_drift")).env("COMPLETE", "yes").arg("--version").output().unwrap();

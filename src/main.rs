@@ -121,7 +121,9 @@ fn complete_revision(current: &OsStr) -> Vec<CompletionCandidate> {
     if after_escape() {
         return complete_pathspec(current);
     }
-    enter_directory();
+    if !enter_directory() {
+        return Vec::new();
+    }
     let Some(current) = current.to_str() else {
         return Vec::new();
     };
@@ -134,10 +136,9 @@ fn complete_revision(current: &OsStr) -> Vec<CompletionCandidate> {
 
 /// Complete paths, but only after `--`, the one place clap takes a pathspec.
 fn complete_pathspec(current: &OsStr) -> Vec<CompletionCandidate> {
-    if !after_escape() {
+    if !after_escape() || !enter_directory() {
         return Vec::new();
     }
-    enter_directory();
     PathCompleter::any().complete(current)
 }
 
@@ -161,8 +162,9 @@ fn after_escape() -> bool {
 
 /// Move into the directory that a `-C DIR` or `--directory DIR` before the
 /// cursor names, since drift runs there. This process completes only the word
-/// under the cursor, so the move affects nothing else.
-fn enter_directory() {
+/// under the cursor, so the move affects nothing else. Returns false if the
+/// move fails. drift then fails too, so the completers offer nothing.
+fn enter_directory() -> bool {
     let words = words_before_cursor();
     let mut dir = None;
     let mut words = words.iter().skip(1).take_while(|w| *w != "--");
@@ -173,14 +175,15 @@ fn enter_directory() {
             dir = Some(PathBuf::from(d));
         }
     }
-    if let Some(dir) = dir {
-        // The shell expands a leading `~` only when it runs the command.
-        let dir = match (dir.strip_prefix("~"), std::env::home_dir()) {
-            (Ok(rest), Some(home)) => home.join(rest),
-            _ => dir,
-        };
-        let _ = std::env::set_current_dir(dir);
-    }
+    let Some(dir) = dir else {
+        return true;
+    };
+    // The shell expands a leading `~` only when it runs the command.
+    let dir = match (dir.strip_prefix("~"), std::env::home_dir()) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => dir,
+    };
+    std::env::set_current_dir(dir).is_ok()
 }
 
 /// Print the script that sets up completion for `shell`. On each TAB, the
