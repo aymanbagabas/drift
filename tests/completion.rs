@@ -131,7 +131,9 @@ fn completes_flags_values_paths_and_revisions() {
 
     // bash breaks a word at `:` and `@`, and replaces only the part after
     // the last one, so drift's bash script must hand back just that part. It
-    // must also keep bash from expanding `dir/[ab].txt` into `dir/a.txt`.
+    // must also keep bash from expanding `dir/[ab].txt` into `dir/a.txt`, and
+    // add the space after a finished word, since bash 3 can't. A word with no
+    // candidates must stay that way: a lone " " would replace the word.
     // `/bin/bash` is bash 3.2 on macOS.
     #[cfg(unix)]
     {
@@ -139,17 +141,20 @@ fn completes_flags_values_paths_and_revisions() {
         std::fs::write(dir.join("dir/a.txt"), "").unwrap();
         for bash in ["bash", "/bin/bash"].into_iter().filter(|b| *b == "bash" || Path::new(b).exists()) {
             for (line, word, want) in [
-                ("drift HEAD:", "", "dir/"),
-                ("drift HEAD~1:tr..HEAD:tr", "tr", "tracked.txt"),
-                ("drift HEAD@{", "@{", "@{1}"),
-                ("drift --diff-algorithm=p", "p", "patience"),
-                ("drift -- dir/[", "dir/[", "dir/[ab].txt"),
+                ("drift HEAD:", "", Some("dir/")),
+                ("drift HEAD~1:tr..HEAD:tr", "tr", Some("tracked.txt ")),
+                ("drift HEAD@{", "@{", Some("@{1} ")),
+                ("drift --diff-algorithm=p", "p", Some("patience ")),
+                ("drift -- dir/[", "dir/[", Some("dir/[ab].txt ")),
+                ("drift zz", "zz", None),
             ] {
                 let bin = Path::new(env!("CARGO_BIN_EXE_drift")).parent().unwrap();
                 let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+                // The count first, since `printf` prints one empty line for
+                // no candidates too.
                 let script = r#"eval "$(drift --completions bash)"
                     COMP_LINE=$LINE COMP_POINT=${#LINE} _drift drift "$WORD"
-                    printf '%s\n' "${COMPREPLY[@]}""#;
+                    printf '%s\n' "${#COMPREPLY[@]}" "${COMPREPLY[@]}""#;
                 let out = Command::new(bash)
                     .current_dir(&dir)
                     .env("PATH", path)
@@ -159,7 +164,11 @@ fn completes_flags_values_paths_and_revisions() {
                     .output()
                     .unwrap();
                 let got = String::from_utf8(out.stdout).unwrap();
-                assert!(got.lines().any(|c| c == want), "{bash} {line}: no {want} in {got:?}");
+                let got: Vec<&str> = got.lines().skip(1).collect();
+                match want {
+                    Some(want) => assert!(got.contains(&want), "{bash} {line}: no {want:?} in {got:?}"),
+                    None => assert!(got.is_empty(), "{bash} {line}: {got:?}"),
+                }
             }
         }
     }

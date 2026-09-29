@@ -222,16 +222,18 @@ const COMPLETE_VAR: &str = "DRIFT_COMPLETE";
 /// of the word that bash replaces. drift separates the candidates with a
 /// vertical tab, since a path can hold a space, and `read` splits them, since
 /// an unquoted `$(...)` would also expand a path like `[id].tsx` as a pattern.
+/// The script adds the space after a finished word itself, as git's script
+/// does, because bash 3 has no `compopt` to add it after only some words.
 const BASH_COMPLETION: &str = r#"_drift() {
-    local IFS=$' \t\n' words cur
+    local IFS=$' \t\n' words cur i
     read -ra words <<< "${COMP_LINE:0:COMP_POINT}"
     [[ ${COMP_LINE:COMP_POINT-1:1} == [[:space:]] ]] && words+=("")
     cur=${words[${#words[@]}-1]}
     IFS=$'\013' read -ra COMPREPLY <<< "$(_CLAP_IFS=$'\013' _CLAP_COMPLETE_INDEX=$((${#words[@]}-1)) DRIFT_COMPLETE=bash drift -- "${words[@]}" 2>/dev/null)"
     COMPREPLY=("${COMPREPLY[@]#"${cur%"$2"}"}")
-    if compopt +o nospace 2>/dev/null && [[ ${COMPREPLY-} =~ [=/:]$ ]]; then
-        compopt -o nospace
-    fi
+    for i in "${!COMPREPLY[@]}"; do
+        [[ ${COMPREPLY[i]} == *[/:=] ]] || COMPREPLY[i]+=" "
+    done
 }
 complete -o nospace -o bashdefault -o nosort -F _drift drift 2>/dev/null ||
     complete -o nospace -o bashdefault -F _drift drift
