@@ -1,8 +1,9 @@
 //! Git integration: runs git to produce diffs and resolves repository layout
 //! so the app works in normal repos, linked worktrees, and bare repos.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// What to diff.
 #[derive(Debug, Clone)]
@@ -144,6 +145,144 @@ pub fn discover() -> Option<Repo> {
         common_dir,
         is_bare,
     })
+}
+
+/// A shell completion: the value, and a description for shells that show one.
+pub type Completion = (String, Option<String>);
+
+/// How many ancestors, reflog entries, and prior branches to offer.
+const RECENT: usize = 20;
+
+/// Shell completions for the git revision `cur` (see gitrevisions(7)):
+/// - `rev@{`: the reflog entries of `rev`, and its upstream and push branches
+/// - `rev:path`: the entries of the tree at `rev:dir/`
+/// - `rev~`: the first-parent ancestors of `rev`
+/// - anything else: HEAD, the pseudo-refs that exist, refs, and commits
+pub fn complete_revision(cur: &str) -> Vec<Completion> {
+    let found = if let Some((rev, _)) = cur.rsplit_once("@{").filter(|(_, sel)| !sel.contains('}')) {
+        reflog(rev)
+    } else if let Some((rev, path)) = cur.split_once(':') {
+        tree(rev, &path[..path.rfind('/').map_or(0, |i| i + 1)])
+    } else if let Some((rev, _)) = cur.rsplit_once('~') {
+        ancestors(rev)
+    } else {
+        names(cur)
+    };
+    found.into_iter().filter(|(value, _)| value.starts_with(cur)).collect()
+}
+
+/// HEAD and the other pseudo-refs that exist, the branches, remote branches,
+/// and tags (every ref once `cur` starts with `refs/`), and, from 4 hex digits
+/// on (git's minimum), the commits whose hash starts with `cur`.
+fn names(cur: &str) -> Vec<Completion> {
+    let mut found = existing(&[
+        "HEAD", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD", "REBASE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+        "BISECT_HEAD", "stash",
+    ]);
+    // `strip=2`, not `short`: git checks each `short` name for ambiguity,
+    // which is slow with many refs.
+    let refs = if cur.starts_with("refs/") {
+        stdout(&["for-each-ref", "--format=%(refname)"])
+    } else {
+        stdout(&["for-each-ref", "--format=%(refname:strip=2)", "refs/heads", "refs/remotes", "refs/tags"])
+    };
+    found.extend(refs.lines().map(|r| (r.to_string(), None)));
+    if cur.len() >= 4 && cur.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // Every object with this prefix; `log --no-walk` keeps the commits.
+        let ids = stdout(&["rev-parse", &format!("--disambiguate={cur}")]);
+        if !ids.is_empty() {
+            let mut args = vec!["log", "--no-walk=unsorted", "--format=%H %h%x09%s"];
+            args.extend(ids.lines());
+            let commits = stdout(&args);
+            // Offer git's abbreviation (`%h`), but never less than `cur`: past
+            // the abbreviation's length, `%h` no longer starts with `cur`.
+            found.extend(commits.lines().filter_map(|l| {
+                let (hashes, subject) = l.split_once('\t')?;
+                let (full, short) = hashes.split_once(' ')?;
+                Some((full.get(..short.len().max(cur.len()))?.into(), Some(subject.into())))
+            }));
+        }
+    }
+    found
+}
+
+/// `rev@{1}`, `rev@{2}`, ... with each reflog subject, and `rev@{upstream}` and
+/// `rev@{push}` with their branch. Without a `rev`, `@{n}` reads the current
+/// branch's reflog, and `@{-1}`, `@{-2}`, ... name the branches checked out
+/// before it.
+fn reflog(rev: &str) -> Vec<Completion> {
+    let mut found = Vec::new();
+    for sel in ["upstream", "push"] {
+        let name = format!("{rev}@{{{sel}}}");
+        let branch = stdout(&["rev-parse", "--abbrev-ref", &name]);
+        if !branch.is_empty() {
+            found.push((name, Some(branch.trim().into())));
+        }
+    }
+    if rev.is_empty() {
+        let prior: Vec<String> = (1..=RECENT).map(|n| format!("@{{-{n}}}")).collect();
+        let mut args = vec!["rev-parse", "--revs-only", "--abbrev-ref"];
+        args.extend(prior.iter().map(String::as_str));
+        // rev-parse prints nothing from the first one that doesn't resolve
+        // (such as a deleted branch) on.
+        let branches = stdout(&args);
+        found.extend(prior.into_iter().zip(branches.lines()).map(|(sel, b)| (sel, Some(b.into()))));
+    }
+    // `log -g @{0}` walks the current branch's reflog, the one `@{1}` reads.
+    let target = if rev.is_empty() { "@{0}" } else { rev };
+    let entries = stdout(&["log", "-g", &format!("-n{}", RECENT + 1), "--format=%gs", target, "--"]);
+    found.extend(entries.lines().enumerate().skip(1).map(|(n, s)| (format!("{rev}@{{{n}}}"), Some(s.into()))));
+    found
+}
+
+/// `rev:dir/name` for each entry of the tree `rev:dir`, with a `/` after each
+/// subtree. `--full-tree` keeps a subdirectory from filtering the list.
+fn tree(rev: &str, dir: &str) -> Vec<Completion> {
+    stdout(&["ls-tree", "-z", "--full-tree", &format!("{rev}:{dir}")])
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\t'))
+        .map(|(meta, name)| {
+            let slash = if meta.contains(" tree ") { "/" } else { "" };
+            (format!("{rev}:{dir}{name}{slash}"), None)
+        })
+        .collect()
+}
+
+/// `rev~1`, `rev~2`, ... with each commit's subject.
+fn ancestors(rev: &str) -> Vec<Completion> {
+    stdout(&["log", "--first-parent", &format!("-n{}", RECENT + 1), "--format=%s", rev, "--"])
+        .lines()
+        .enumerate()
+        .skip(1)
+        .map(|(n, subject)| (format!("{rev}~{n}"), Some(subject.into())))
+        .collect()
+}
+
+/// The `names` that resolve to an object, checked in one `git cat-file` run.
+fn existing(names: &[&str]) -> Vec<Completion> {
+    let child = Command::new("git")
+        .args(["cat-file", "--batch-check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return Vec::new();
+    };
+    // The few names fit in the pipe buffer, so this write can't block.
+    let _ = child.stdin.take().map(|mut stdin| stdin.write_all(names.join("\n").as_bytes()));
+    let out = child.wait_with_output().map(|o| o.stdout).unwrap_or_default();
+    names
+        .iter()
+        .zip(String::from_utf8_lossy(&out).lines())
+        .filter(|(_, line)| !line.ends_with(" missing"))
+        .map(|(name, _)| (name.to_string(), None))
+        .collect()
+}
+
+/// What a git command printed to stdout; empty if git can't run.
+fn stdout(args: &[&str]) -> String {
+    git(args).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
 }
 
 /// Absolute path to the working-tree root, or None for bare repos.
