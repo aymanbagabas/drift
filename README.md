@@ -111,7 +111,8 @@ revisions: refs, commit hashes, `HEAD~2` ancestors, `HEAD@{1}` reflog entries,
 `@{upstream}`, `HEAD:src/` paths, and both ends of a range like
 `main..feature`.
 
-Add the line for your shell to its startup file:
+The Homebrew, deb, rpm, apk, AUR, and Nix packages set this up for bash, zsh,
+and fish. Otherwise, add the line for your shell to its startup file:
 
 ```sh
 eval "$(drift --completions bash)"   # bash: ~/.bashrc
