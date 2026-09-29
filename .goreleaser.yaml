@@ -15,6 +15,8 @@ before:
     - >-
       sh -c '{{ if .IsSnapshot }}true{{ else }}grep -q "^version = \"{{ .Version }}\"" Cargo.toml
       || { echo "Cargo.toml version != tag {{ .Version }}"; exit 1; }{{ end }}'
+    # Generate the shell completion scripts that the archives and packages ship.
+    - sh -c 'mkdir -p completions && for sh in bash zsh fish; do cargo run --quiet --locked -- --completions "$sh" > "completions/drift.$sh" || exit 1; done'
 
 builds:
   # macOS builds natively (command: build, not the default zigbuild) so notify's
@@ -59,6 +61,7 @@ archives:
       - LICENSE
       - CONFIG.md
       - themes/*
+      - completions/*
 
 checksum:
   name_template: "checksums.txt"
@@ -94,6 +97,22 @@ nfpms:
     formats: [deb, rpm, apk]
     dependencies:
       - git
+    contents:
+      - src: ./completions/drift.bash
+        dst: /usr/share/bash-completion/completions/drift
+      - src: ./completions/drift.fish
+        dst: /usr/share/fish/vendor_completions.d/drift.fish
+      # Debian's zsh reads packaged completions from vendor-completions; other
+      # distributions read them from site-functions.
+      - src: ./completions/drift.zsh
+        dst: /usr/share/zsh/vendor-completions/_drift
+        packager: deb
+      - src: ./completions/drift.zsh
+        dst: /usr/share/zsh/site-functions/_drift
+        packager: rpm
+      - src: ./completions/drift.zsh
+        dst: /usr/share/zsh/site-functions/_drift
+        packager: apk
 
 # Push the Linux packages to Gemfury (serves the apt/yum repo at
 # repo.aymanbagabas.com). Requires the `fury` CLI and a FURY_TOKEN in CI.
@@ -117,6 +136,11 @@ brews:
     license: MIT
     dependencies:
       - name: git
+    install: |
+      bin.install "drift"
+      bash_completion.install "completions/drift.bash" => "drift"
+      zsh_completion.install "completions/drift.zsh" => "_drift"
+      fish_completion.install "completions/drift.fish"
     commit_author:
       name: Ayman Bagabas
       email: ayman.bagabas@gmail.com
@@ -155,6 +179,8 @@ nix:
     main_program: drift
     dependencies:
       - git
+    extra_install: |-
+      installShellCompletion ./completions/*
     commit_author:
       name: Ayman Bagabas
       email: ayman.bagabas@gmail.com
@@ -180,6 +206,9 @@ aurs:
     package: |-
       install -Dm755 "./drift" "${pkgdir}/usr/bin/drift"
       install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/drift/LICENSE"
+      install -Dm644 ./completions/drift.bash "${pkgdir}/usr/share/bash-completion/completions/drift"
+      install -Dm644 ./completions/drift.zsh "${pkgdir}/usr/share/zsh/site-functions/_drift"
+      install -Dm644 ./completions/drift.fish "${pkgdir}/usr/share/fish/vendor_completions.d/drift.fish"
 
 release:
   github:
