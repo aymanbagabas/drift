@@ -16,6 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# Exact: drift's own completion scripts (src/main.rs) speak clap_complete's
+# unstable-dynamic protocol, which can change in any release.
+clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
 uncurses = "0.0.5"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 notify = "8"

@@ -104,6 +104,31 @@ the `drift` binary on your `PATH`.
 
 Every method installs a `drift` binary.
 
+### Shell completions
+
+drift completes its flags and option values, paths after `--`, and git
+revisions: refs, commit hashes, `HEAD~2` ancestors, `HEAD@{1}` reflog entries,
+`@{upstream}`, `HEAD:src/` paths, and both ends of a range like
+`main..feature`.
+
+The Homebrew, deb, rpm, apk, AUR, and Nix packages set this up for bash, zsh,
+and fish. Otherwise, add the line for your shell to its startup file:
+
+```sh
+eval "$(drift --completions bash)"   # bash: ~/.bashrc
+source <(drift --completions zsh)    # zsh: ~/.zshrc, after compinit
+drift --completions fish | source    # fish: ~/.config/fish/completions/drift.fish
+```
+
+For PowerShell, add `drift --completions powershell | Out-String | Invoke-Expression`
+to `$PROFILE`. For Elvish, add `eval (drift --completions elvish | slurp)` to
+`rc.elv`.
+
+zsh and fish treat an unmatched `{` as brace expansion, and PowerShell treats
+it as the start of a script block. To complete a reflog entry in these shells,
+quote the word (`'HEAD@{`). In zsh and fish, you can also escape the brace
+(`HEAD@\{`).
+
 ## Use it
 
 ```sh

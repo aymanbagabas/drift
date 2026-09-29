@@ -164,3 +164,4 @@ Per-run options (see `drift --help` for the full list):
 | `--ignore-whitespace` | Ignore whitespace-only changes |
 | `-U`, `--context N` | Lines of context around each change |
 | `--diff-algorithm ALGO` | `myers`, `minimal`, `patience`, or `histogram` |
+| `--completions SHELL` | Print the completion script for `bash`, `zsh`, `fish`, `powershell`, or `elvish` (see the README) |
