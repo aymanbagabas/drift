@@ -144,11 +144,16 @@ git diff | drift          # pager mode: read a diff from stdin
 > [!TIP]
 > Pair it with an AI agent. Leave `drift -w` open in a split while an agent (Copilot, Claude, etc.) works, every edit lands on screen instantly. Press <kbd>F</kbd> to freeze the view when you want to read, and again to resume.
 
-Make it your default git diff pager:
+Make it your default pager for `git diff` and `git show`:
 
 ```sh
 git config --global pager.diff drift
+git config --global pager.show drift
 ```
+
+As the `git show` pager, drift shows the commit's hash, author, date, and
+message above its diff. drift prints output that isn't a diff, such as
+`git show HEAD:README.md` or `git show --stat`, straight to the terminal.
 
 drift defaults to the `ansi` theme — your terminal's own colors, with syntax
 highlighting off. Pick a theme to turn it on, globally via git config:
