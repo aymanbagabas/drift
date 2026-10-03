@@ -126,12 +126,19 @@ you name are overridden.
 | `sidebar-border` | `surface` |
 | `search-match` | `background secondary bold` |
 | `search-current` | `background primary bold` |
+| `selection` | `reverse` |
+
+`selection` is layered over the text it covers, so any slot you leave unset
+keeps the content's own color. The default `reverse` just inverts each cell;
+`selection = "- #ffd700"` paints a solid background while each character keeps
+its syntax color.
 
 ```toml
 [styles]
 header    = "header bold underline"
 statusbar = "foreground surface"
 help-desc = "muted italic"
+selection = "- #ffd700"
 ```
 
 ## Themes
