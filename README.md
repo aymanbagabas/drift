@@ -322,7 +322,7 @@ Or in `~/.gitconfig` directly:
     add-emph = "#003300"
 [drift "styles"]
     statusbar = "foreground surface bold"
-    selection = "none #ffd700"
+    selection = "default #ffd700"
 ```
 
 For the full list of every setting, color, component style, and flag, see
