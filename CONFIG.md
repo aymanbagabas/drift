@@ -129,9 +129,9 @@ you name are overridden.
 | `selection` | `reverse` |
 
 `selection` is layered over the text it covers, so any slot you leave unset
-keeps the content's own color. The default `reverse` just inverts each cell;
-`selection = "none #ffd700"` paints a solid background while each character keeps
-its syntax color.
+keeps the underlying color. The default `reverse` just inverts each cell;
+`selection = "none #ffd700"` paints a solid background and preserves the
+underlying foreground, including search highlights.
 
 ```toml
 [styles]
