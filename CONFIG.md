@@ -130,7 +130,7 @@ you name are overridden.
 
 `selection` is layered over the text it covers, so any slot you leave unset
 keeps the content's own color. The default `reverse` just inverts each cell;
-`selection = "default #ffd700"` paints a solid background while each character keeps
+`selection = "none #ffd700"` paints a solid background while each character keeps
 its syntax color.
 
 ```toml
@@ -138,7 +138,7 @@ its syntax color.
 header    = "header bold underline"
 statusbar = "foreground surface"
 help-desc = "muted italic"
-selection = "default #ffd700"
+selection = "none #ffd700"
 ```
 
 ## Themes
