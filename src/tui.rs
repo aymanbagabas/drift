@@ -72,6 +72,11 @@ struct Theme {
     // accent palette so every theme gets it without per-theme tuning.
     search_match: Style,
     search_current: Style,
+    /// Text selection highlight, layered over the selected cells via
+    /// `Style::inherit` so unset fields keep the content's own color. The
+    /// default spec `reverse` just inverts each cell, as selection did before
+    /// it was configurable.
+    selection: Style,
     /// Idle-mascot colours: filled body and antenna/reaction accent. The face
     /// glyphs (eyes) are always black, drawn on top of the body.
     mascot_body: Color,
@@ -122,6 +127,7 @@ impl Theme {
             sidebar_border: sty("sidebar-border"),
             search_match: sty("search-match"),
             search_current: sty("search-current"),
+            selection: sty("selection"),
             mascot_body: pal.color("primary").unwrap_or(Color::Indexed(99)),
             mascot_accent: pal.color("secondary").unwrap_or(Color::Indexed(75)),
         }
@@ -3040,10 +3046,11 @@ impl App {
                 }
             }
         }
+        let sel_style = self.theme.selection.clone();
         for (y, sx, ex) in segs {
             for x in sx..ex {
                 if let Some(c) = self.program.screen_mut().cell_mut((x, y)) {
-                    c.style = c.style.clone().reverse();
+                    c.style = sel_style.inherit(&c.style);
                 }
             }
         }
@@ -4650,8 +4657,11 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, abbrev_with_home, Face, Mascot, Sel, Span, MASCOT_H, MASCOT_W};
+    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, abbrev_with_home, Face, Mascot, Sel, Span, Theme, MASCOT_H, MASCOT_W};
+    use crate::config::Config;
     use regex::RegexBuilder;
+    use uncurses::color::Color;
+    use uncurses::style::{AttrFlags, Style};
     use uncurses::text::{grapheme_cells, WidthMode};
 
     // Exercise the same fitting logic clip() uses; clip() itself needs a live
@@ -4662,6 +4672,42 @@ mod tests {
 
     fn slice_h(s: &str, skip: u16, width: u16) -> (String, u16) {
         slice_fit(grapheme_cells(s, WidthMode::Grapheme, false), skip, width)
+    }
+
+    #[test]
+    fn selection_style_defaults_to_reverse_and_is_configurable() {
+        // Default: no override resolves to the built-in `reverse`, so applying
+        // it over a cell keeps the cell's own colors and just inverts it —
+        // exactly what selection did before it was configurable.
+        let dflt = Theme::from_config(&Config::default());
+        assert_eq!(dflt.selection.fg, None);
+        assert_eq!(dflt.selection.bg, None);
+        assert!(dflt.selection.attrs.contains(AttrFlags::REVERSE));
+        let base = Style::default().fg(Color::Green).bg(Color::Black);
+        let painted = dflt.selection.inherit(&base);
+        assert_eq!(painted.fg, Some(Color::Green)); // content fg preserved
+        assert_eq!(painted.bg, Some(Color::Black)); // content bg preserved
+        assert!(painted.attrs.contains(AttrFlags::REVERSE));
+
+        // Override with fg+bg+attr, same spec grammar as every other style.
+        let mut c = Config::default();
+        c.styles.insert("selection".into(), "black #ffd700 bold".into());
+        let over = Theme::from_config(&c).selection;
+        assert_eq!(over.fg, Some(Color::Black));
+        assert_eq!(over.bg, Some(Color::Rgb(0xff, 0xd7, 0x00)));
+        assert!(over.attrs.contains(AttrFlags::BOLD));
+        // Set fields win; the content's color only fills the slots left unset.
+        let painted = over.inherit(&base);
+        assert_eq!(painted.fg, Some(Color::Black));
+        assert_eq!(painted.bg, Some(Color::Rgb(0xff, 0xd7, 0x00)));
+
+        // Background only (`-` skips the fg slot), so each character keeps its
+        // own foreground under a solid selection band.
+        let mut c = Config::default();
+        c.styles.insert("selection".into(), "- #ffd700".into());
+        let bg_only = Theme::from_config(&c).selection.inherit(&base);
+        assert_eq!(bg_only.fg, Some(Color::Green)); // content fg kept
+        assert_eq!(bg_only.bg, Some(Color::Rgb(0xff, 0xd7, 0x00)));
     }
 
     #[test]

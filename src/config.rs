@@ -631,6 +631,7 @@ pub fn builtin_style(theme: &str, component: &str) -> &'static str {
         "sidebar-border" => "surface",
         "search-match" => "background secondary bold",
         "search-current" => "background primary bold",
+        "selection" => "reverse",
         _ => "",
     }
 }
