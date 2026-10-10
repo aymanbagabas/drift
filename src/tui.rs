@@ -5012,6 +5012,13 @@ mod tests {
         assert_ne!(theme.statusbar_position.bg, theme.statusbar.bg);
         assert_ne!(theme.statusbar_position.bg, theme.statusbar_help.bg);
 
+        for name in ["onedark", "onelight"] {
+            config.theme = name.into();
+            let theme = Theme::from_config(&config);
+            assert_eq!(theme.statusbar_position.bg, Some(theme.cursor_bg));
+            assert_ne!(theme.statusbar_position.bg, theme.statusbar.bg);
+        }
+
         config.styles.insert("statusbar-position".into(), "black #ffd700".into());
         let style = Theme::from_config(&config).statusbar_position;
         assert_eq!(style.fg, Some(super::Color::Black));

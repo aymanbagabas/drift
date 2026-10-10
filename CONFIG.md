@@ -118,7 +118,7 @@ you name are overridden.
 | `statusbar-stats` | `foreground surface` |
 | `statusbar-search` | `secondary surface` |
 | `statusbar-watch` | `background add bold` |
-| `statusbar-position` | `background foreground` |
+| `statusbar-position` | `foreground cursor` |
 | `statusbar-help` | `background secondary bold` |
 | `help-key` | `muted bold` |
 | `help-desc` | `muted faint` |
@@ -135,7 +135,9 @@ keeps the underlying color. The default `reverse` just inverts each cell;
 underlying foreground, including search highlights.
 
 `statusbar-position` styles the footer position indicator (`Top`, `42%`, `Bot`,
-or `All`). Its background separates it from the rest of the bar.
+or `All`). It uses the cursor shade for a subtle background difference.
+The `ansi` theme uses `foreground 238` because its cursor and surface colors
+are identical.
 
 ```toml
 [styles]
