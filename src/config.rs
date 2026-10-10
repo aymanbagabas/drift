@@ -623,6 +623,7 @@ pub fn builtin_style(theme: &str, component: &str) -> &'static str {
         "statusbar-stats" => "foreground surface",
         "statusbar-search" => "secondary surface",
         "statusbar-watch" => "background add bold",
+        "statusbar-position" => "background foreground",
         "statusbar-help" => "background secondary bold",
         "help-key" => "muted bold",
         "help-desc" => "muted faint",

@@ -118,6 +118,7 @@ you name are overridden.
 | `statusbar-stats` | `foreground surface` |
 | `statusbar-search` | `secondary surface` |
 | `statusbar-watch` | `background add bold` |
+| `statusbar-position` | `background foreground` |
 | `statusbar-help` | `background secondary bold` |
 | `help-key` | `muted bold` |
 | `help-desc` | `muted faint` |
@@ -132,6 +133,9 @@ you name are overridden.
 keeps the underlying color. The default `reverse` just inverts each cell;
 `selection = "none #ffd700"` paints a solid background and preserves the
 underlying foreground, including search highlights.
+
+`statusbar-position` styles the footer position indicator (`Top`, `42%`, `Bot`,
+or `All`). Its background separates it from the rest of the bar.
 
 ```toml
 [styles]
