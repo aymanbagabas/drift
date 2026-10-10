@@ -680,14 +680,14 @@ fn text_cells(s: &str) -> Line {
     let mut cells = Line::new();
     for (g, w) in grapheme_cells(s, WidthMode::Grapheme, false) {
         if w >= 2 {
-            cells.push(Cell::wide(g));
+            cells.push(Cell::new(g, w));
             // One continuation cell per extra column, so `cells.len()` equals
             // the grapheme's display width for any wide cluster.
             for _ in 1..w {
-                cells.push(Cell::continuation());
+                cells.push(Cell::CONTINUATION);
             }
         } else if w == 1 {
-            cells.push(Cell::narrow(g));
+            cells.push(Cell::new(g, 1));
         }
     }
     cells
