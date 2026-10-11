@@ -59,6 +59,7 @@ struct Theme {
     statusbar_stats: Style,
     statusbar_search: Style,
     statusbar_watch: Style,
+    statusbar_position: Style,
     statusbar_help: Style,
     // Help grid.
     help_key: Style,
@@ -119,6 +120,7 @@ impl Theme {
             statusbar_stats: sty("statusbar-stats"),
             statusbar_search: sty("statusbar-search"),
             statusbar_watch: sty("statusbar-watch"),
+            statusbar_position: sty("statusbar-position"),
             statusbar_help: sty("statusbar-help"),
             help_key: sty("help-key"),
             help_desc: sty("help-desc"),
@@ -3226,13 +3228,14 @@ impl App {
             self.scroll = r;
             self.scroll_seg = s;
         }
-        if empty {
+        let at_end = if empty {
             // Body is blank; the mascot is painted last, above everything.
+            true
         } else if self.split {
-            self.render_split(bx, bw, body_h);
+            self.render_split(bx, bw, body_h)
         } else {
-            self.render_diff(bx, bw, body_h);
-        }
+            self.render_diff(bx, bw, body_h)
+        };
         if !empty && !self.mascot_pinned {
             self.mascot = None;
             self.mascot_grab = None;
@@ -3245,7 +3248,7 @@ impl App {
         // Footer bar sits just above the help grid (when the grid is open the
         // footer is "pushed up" to make room below it).
         let footer_row = body_h;
-        self.render_footer(footer_row);
+        self.render_footer(footer_row, at_end);
         if self.help_open {
             self.render_help_grid(footer_row + 1, h);
         }
@@ -3268,8 +3271,8 @@ impl App {
 
     /// The single bottom footer: a bold "drift" badge, the current file name,
     /// its stats and flags on a subtle chip, then right-aligned global stats, a
-    /// watch indicator, and a "? help" badge.
-    fn render_footer(&mut self, row: u16) {
+    /// watch indicator, a position indicator, and a "? help" badge.
+    fn render_footer(&mut self, row: u16, at_end: bool) {
         let w = self.program.screen_mut().width();
         let (nf, add, del) = diff::totals(&self.files);
         let file = self.files.get(self.selected);
@@ -3285,22 +3288,36 @@ impl App {
         self.program.screen_mut()
             .set_str((0, row), &" ".repeat(w as usize), bar.clone());
 
-        // Right edge, laid out right-to-left: "? help" badge, the watch badge
-        // (only when watch mode is on), then the global diffstat.
+        // Right edge: help, position, optional flags, then the global diffstat.
         let help_badge = " ? help ";
         let help_x = w.saturating_sub(self.width(help_badge));
         self.help_badge_x = help_x;
         self.program.screen_mut()
             .set_str((help_x, row), help_badge, self.theme.statusbar_help.clone());
 
+        // A reload can cancel prefetch before all file rows arrive.
+        let position_x = if self.loading || self.file_starts.len() < self.files.len() {
+            help_x
+        } else {
+            let position = scroll_position(
+                self.scroll, self.scroll_seg, self.vheight(self.scroll),
+                self.doc_rows.len(), at_end,
+            );
+            let badge = format!(" {position:>3} ");
+            let px = help_x.saturating_sub(self.width(&badge));
+            self.program.screen_mut()
+                .set_str((px, row), &badge, self.theme.statusbar_position.clone());
+            px
+        };
+
         let w_x = if self.watch {
             let w_badge = " F ";
-            let wx = help_x.saturating_sub(self.width(w_badge));
+            let wx = position_x.saturating_sub(self.width(w_badge));
             self.program.screen_mut()
                 .set_str((wx, row), w_badge, self.theme.statusbar_watch.clone());
             wx
         } else {
-            help_x
+            position_x
         };
 
         // "A" badge when the worktree view includes untracked files.
@@ -3316,6 +3333,7 @@ impl App {
 
         // Global stats.
         let stats = format!(" {nf} files +{add} -{del} ");
+        let (stats, _) = self.clip(&stats, a_x);
         let stats_x = a_x.saturating_sub(self.width(&stats));
         self.program.screen_mut()
             .set_str((stats_x, row), &stats, self.theme.statusbar_stats.clone());
@@ -3726,7 +3744,8 @@ impl App {
         self.program.screen_mut().set_str((x, y), &" ".repeat(width as usize), st);
     }
 
-    fn render_diff(&mut self, x: u16, width: u16, body_h: u16) {
+    // Return whether the final visual line is visible.
+    fn render_diff(&mut self, x: u16, width: u16, body_h: u16) -> bool {
         // The sticky band pins the enclosing file/hunk headers to the top; the
         // scrolled content follows below it.
         let sticky = self.sticky_rows();
@@ -3771,12 +3790,15 @@ impl App {
         }
         // Restore the rows we borrowed.
         self.doc_rows = rows;
+        row >= self.doc_rows.len()
+            || (row + 1 == self.doc_rows.len() && seg >= self.vheight(row))
     }
 
     /// Side-by-side rendering: old lines on the left pane, new on the right,
     /// context on both, with a divider column. Where one side has no matching
     /// line (a pure add or delete) that half is hatched with `╱`.
-    fn render_split(&mut self, x: u16, width: u16, body_h: u16) {
+    /// Returns whether the final visual line is visible.
+    fn render_split(&mut self, x: u16, width: u16, body_h: u16) -> bool {
         if width < 5 {
             return self.render_diff(x, width, body_h);
         }
@@ -3817,6 +3839,8 @@ impl App {
             seg += 1;
         }
         self.doc_rows = rows;
+        row >= self.doc_rows.len()
+            || (row + 1 == self.doc_rows.len() && seg >= self.vheight(row))
     }
 
     /// Draw visual segment `seg` of a row across the two split panes at screen
@@ -4378,6 +4402,23 @@ fn max_scroll_for(kinds: &[RowKind], file_starts: &[usize], body_h: usize) -> us
     let cand = (n + k1).saturating_sub(body_h);
     let k2 = sticky_at(kinds, file_starts, cand, body_h).len();
     (n + k1.max(k2)).saturating_sub(body_h)
+}
+
+fn scroll_position(row: usize, seg: usize, height: usize, rows: usize, at_end: bool) -> String {
+    let at_top = row == 0 && seg == 0;
+    if rows == 0 || (at_top && at_end) {
+        "All".to_string()
+    } else if at_top {
+        "Top".to_string()
+    } else if at_end {
+        "Bot".to_string()
+    } else {
+        // Measure document rows, with a fraction for a wrapped top row. This
+        // avoids measuring every row's visual height on each scroll or resize.
+        let position = row as f64 + seg as f64 / height as f64;
+        let percent = (position * 100.0 / rows as f64) as usize;
+        format!("{}%", percent.min(99))
+    }
 }
 
 /// One file delivered by the stdin streamer (`spawn_stream`): its parsed form,
@@ -4949,6 +4990,40 @@ mod tests {
         let kinds = [File, Hunk, Context, Context];
         assert_eq!(max_scroll_for(&kinds, &[0], 10), 0); // body taller than doc
         assert_eq!(max_scroll_for(&kinds, &[0], 4), 0); // exact fit
+    }
+
+    #[test]
+    fn footer_position_tracks_the_viewport() {
+        use super::scroll_position;
+
+        assert_eq!(scroll_position(0, 0, 1, 0, true), "All");
+        assert_eq!(scroll_position(0, 0, 1, 10, true), "All");
+        assert_eq!(scroll_position(0, 0, 1, 100, false), "Top");
+        assert_eq!(scroll_position(42, 0, 1, 100, false), "42%");
+        assert_eq!(scroll_position(80, 0, 1, 100, true), "Bot");
+        assert_eq!(scroll_position(0, 5, 10, 1, false), "50%");
+        assert_eq!(scroll_position(0, 5, 10, 1, true), "Bot");
+        assert_eq!(scroll_position(99, 9, 10, 100, false), "99%");
+    }
+
+    #[test]
+    fn footer_position_style_is_configurable() {
+        let mut config = crate::config::Config::default();
+        let theme = Theme::from_config(&config);
+        assert_ne!(theme.statusbar_position.bg, theme.statusbar.bg);
+        assert_ne!(theme.statusbar_position.bg, theme.statusbar_help.bg);
+
+        for name in ["onedark", "onelight"] {
+            config.theme = name.into();
+            let theme = Theme::from_config(&config);
+            assert_eq!(theme.statusbar_position.bg, Some(theme.cursor_bg));
+            assert_ne!(theme.statusbar_position.bg, theme.statusbar.bg);
+        }
+
+        config.styles.insert("statusbar-position".into(), "black #ffd700".into());
+        let style = Theme::from_config(&config).statusbar_position;
+        assert_eq!(style.fg, Some(super::Color::Black));
+        assert_eq!(style.bg, Some(super::Color::Rgb(255, 215, 0)));
     }
 
     #[test]

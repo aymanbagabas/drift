@@ -607,6 +607,9 @@ pub fn builtin_style(theme: &str, component: &str) -> &'static str {
     if theme == "ansi" && component == "help-desc" {
         return "default";
     }
+    if component == "statusbar-position" && (theme == "ansi" || builtin_named(theme).is_none()) {
+        return "foreground 238";
+    }
     match component {
         "add" => "add",
         "remove" => "remove",
@@ -623,6 +626,7 @@ pub fn builtin_style(theme: &str, component: &str) -> &'static str {
         "statusbar-stats" => "foreground surface",
         "statusbar-search" => "secondary surface",
         "statusbar-watch" => "background add bold",
+        "statusbar-position" => "foreground cursor",
         "statusbar-help" => "background secondary bold",
         "help-key" => "muted bold",
         "help-desc" => "muted faint",
