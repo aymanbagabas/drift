@@ -3295,7 +3295,8 @@ impl App {
         self.program.screen_mut()
             .set_str((help_x, row), help_badge, self.theme.statusbar_help.clone());
 
-        let position_x = if self.loading || self.prefetch.is_some() {
+        // A reload can cancel prefetch before all file rows arrive.
+        let position_x = if self.loading || self.file_starts.len() < self.files.len() {
             help_x
         } else {
             let position = scroll_position(
