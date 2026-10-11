@@ -180,6 +180,11 @@ Some flags worth knowing:
 
 ## Keys
 
+The footer shows your position in the whole diff: `Top`, a percentage such as
+`42%`, or `Bot`. It shows `All` when the whole diff fits on screen. Percentages
+use the top visible document row, including progress through a wrapped row.
+The indicator stays hidden while the initial diff loads.
+
 | Key | Action |
 |-----|--------|
 | `j` `k` / `↑` `↓` | Move the cursor |

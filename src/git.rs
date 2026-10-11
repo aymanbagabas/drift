@@ -409,10 +409,15 @@ fn untracked_diff(opts: &Opts) -> std::io::Result<String> {
 mod tests {
     use super::*;
 
+    // The working directory is process-wide. Hold this through restoration
+    // and cleanup so the repository tests cannot enter each other's directories.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// `-A` surfaces an untracked file as a new-file diff with clean `a/ b/`
     /// prefixes, on top of the tracked change.
     #[test]
     fn all_includes_untracked() {
+        let _cwd = CWD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("drift-git-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -450,6 +455,7 @@ mod tests {
     /// the parentless case is the easy one to break.
     #[test]
     fn rev_single_commit_renders_patch() {
+        let _cwd = CWD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("drift-rev-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
