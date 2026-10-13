@@ -4,6 +4,7 @@ mod config;
 mod diff;
 mod git;
 mod highlight;
+mod links;
 mod tui;
 mod watch;
 

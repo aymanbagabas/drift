@@ -1,8 +1,11 @@
 //! The terminal UI: a scrollable, syntax-highlighted diff pane with a single
 //! bottom footer, driven by an uncurses `Screen`.
 
+use std::borrow::Cow;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +18,7 @@ use uncurses::cell::Cell;
 use uncurses::color::Color;
 use uncurses::event::{Event, Key, KeyModifiers, MouseButton};
 use uncurses::program::{MouseTracking, Program, ProgramOptions};
-use uncurses::style::{AttrFlags, Style};
+use uncurses::style::{AttrFlags, Link, Style};
 use uncurses::terminal::{TtyInput, TtyOutput};
 use uncurses::text::{grapheme_cells, TextSurface, WidthMode};
 
@@ -193,18 +196,31 @@ struct Row {
     /// exact column-to-text mapping (wide chars included) without touching the
     /// screen. A cell index equals a screen column offset from `content_start`.
     content: Line,
+    /// UTF-8 byte ranges in the concatenated spans, independent of cell widths.
+    links: Vec<(Range<usize>, Arc<Link>)>,
 }
 
 impl Row {
     fn new(kind: RowKind, old_no: Option<usize>, new_no: Option<usize>, spans: Vec<Span>) -> Self {
-        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        static NEXT_LINK_ID: AtomicU64 = AtomicU64::new(1);
+
+        let text = match spans.as_slice() {
+            [] => Cow::Borrowed(""),
+            [span] => Cow::Borrowed(span.text.as_str()),
+            _ => Cow::Owned(spans.iter().map(|s| s.text.as_str()).collect::<String>()),
+        };
         let content = text_cells(&text);
+        let links = crate::links::find(&text).map(|(range, target)| {
+            let id = NEXT_LINK_ID.fetch_add(1, Ordering::Relaxed);
+            (range, Arc::new(Link { url: target, params: format!("id=drift-{id}") }))
+        }).collect();
         Row {
             kind,
             old_no,
             new_no,
             spans,
             content,
+            links,
         }
     }
 }
@@ -739,6 +755,7 @@ pub struct App {
     /// row index. Built lazily by the prefetch worker after startup.
     doc_rows: Vec<Row>,
     file_starts: Vec<usize>,
+    text_runs: Vec<TextRun>,
     /// Background row builder feeding `doc_rows` after startup so the first
     /// frame isn't blocked on syntax highlighting.
     prefetch: Option<Receiver<(usize, Vec<Row>)>>,
@@ -928,6 +945,7 @@ impl App {
             raw_files: Vec::new(),
             doc_rows: Vec::new(),
             file_starts: Vec::new(),
+            text_runs: Vec::new(),
             prefetch: None,
             stream: None,
             stream_prefix,
@@ -3173,7 +3191,9 @@ impl App {
             let st = if cur { &cstyle } else { &mstyle };
             for x in sx..ex {
                 if let Some(c) = self.program.screen_mut().cell_mut((x, y)) {
+                    let link = c.style.link.clone();
                     c.style = st.clone();
+                    c.style.link = link;
                 }
             }
         }
@@ -3953,16 +3973,11 @@ impl App {
         cx += num_w;
 
         // Sign column + base style per row kind.
-        let (sign, base, sign_style) = match r.kind {
-            RowKind::Add => ("+", &self.theme.add, self.theme.add.clone().bold()),
-            RowKind::Remove => ("-", &self.theme.remove, self.theme.remove.clone().bold()),
-            RowKind::Context => (" ", &self.theme.context, self.theme.context.clone()),
-            RowKind::File => {
-                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
-                self.program.screen_mut()
-                    .set_str((cx, y), &s, bg(self.theme.header.clone().bold()));
-                return;
-            }
+        let (sign, base) = match r.kind {
+            RowKind::Add => ("+", self.theme.add.clone()),
+            RowKind::Remove => ("-", self.theme.remove.clone()),
+            RowKind::Context => (" ", self.theme.context.clone()),
+            RowKind::File => ("", self.theme.header.clone().bold()),
             RowKind::Hunk => {
                 // Gutter symbol: a hunk header can always reveal more context
                 // (in a repo source). Skip it in pager mode, where there's no
@@ -3973,10 +3988,7 @@ impl App {
                     self.program.screen_mut()
                         .set_str((x + num_w - 2, y), &self.context_sym, bg(self.theme.line_number.clone()));
                 }
-                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
-                self.program.screen_mut()
-                    .set_str((cx, y), &s, bg(self.theme.header.clone()));
-                return;
+                ("", self.theme.header.clone())
             }
             RowKind::CommitLine => {
                 // Gutter symbol: the commit line folds its metadata. Only when
@@ -3993,33 +4005,23 @@ impl App {
                         .set_str((x + num_w - 2, y), sym, bg(self.theme.line_number.clone()));
                 }
                 // The commit line, always shown and bold like the file header.
-                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
-                self.program.screen_mut()
-                    .set_str((cx, y), &s, bg(self.theme.header.clone().bold()));
-                return;
+                ("", self.theme.header.clone().bold())
             }
-            RowKind::Meta => {
-                // Same color as the diff headers, but not bold. Like the file
-                // and hunk headers, it starts past the gutter (no line numbers
-                // or sign column), not at the far-left edge.
-                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
-                self.program.screen_mut()
-                    .set_str((cx, y), &s, bg(self.theme.meta.clone()));
-                return;
-            }
-            RowKind::Note => {
-                let (s, _) = self.slice_h(&r.spans[0].text, self.hscroll as u16, width);
-                self.program.screen_mut()
-                    .set_str((cx, y), &s, bg(self.theme.context.clone().faint()));
-                return;
-            }
+            RowKind::Meta => ("", self.theme.meta.clone()),
+            RowKind::Note => ("", self.theme.context.clone().faint()),
         };
-        if seg == 0 {
+        let is_content = !sign.is_empty();
+        if seg == 0 && is_content {
+            let sign_style = if matches!(r.kind, RowKind::Add | RowKind::Remove) {
+                base.clone().bold()
+            } else {
+                base.clone()
+            };
             self.program.screen_mut().set_str((cx, y), sign, bg(sign_style));
         }
         // Continuation segments leave the sign column blank; the wrap symbol is
         // drawn as the first indented content char below.
-        cx += 1;
+        cx += u16::from(is_content);
 
         let emph_bg = match r.kind {
             RowKind::Add => self.theme.add_emph_bg,
@@ -4038,7 +4040,7 @@ impl App {
         // sign). Fall through to the non-wrap offset so the wrap math (which
         // elsewhere clamps widths to >= 1) stays consistent and nothing is drawn
         // at or past the right edge.
-        let (hs, content_x0) = if self.wrap && cw > 0 {
+        let (hs, content_x0) = if is_content && self.wrap && cw > 0 {
             let prefix = self.wrap_prefix_width(r, cw);
             let (col_off, draw_indent) = wrap_seg_offset(&r.content, seg, cw, prefix);
             if seg > 0 {
@@ -4066,25 +4068,23 @@ impl App {
         // Content column where the current span begins. The gutter and sign are
         // pinned; only the spans past `content_x0` shift left by `hscroll`.
         let mut vcol: u16 = 0;
+        let mut byte_offset = 0;
         for span in &r.spans {
             let spanw = self.width(&span.text);
-            let screen_x = content_x0 + vcol.saturating_sub(hs);
+            let mut screen_x = content_x0 + vcol.saturating_sub(hs);
             if screen_x >= avail {
                 break;
             }
             let skip = hs.saturating_sub(vcol);
             if skip >= spanw {
                 vcol += spanw;
+                byte_offset += span.text.len();
                 continue;
             }
             let remaining = avail - screen_x;
-            let (text, _) = self.slice_h(&span.text, skip, remaining);
             vcol += spanw;
-            if text.is_empty() {
-                continue;
-            }
-            let mut style = if self.config.syntax_enabled() {
-                Style::default().fg(span.fg.or_else(|| base_fg(base)))
+            let mut style = if is_content && self.config.syntax_enabled() {
+                Style::default().fg(span.fg.or_else(|| base_fg(&base)))
             } else {
                 base.clone()
             };
@@ -4093,7 +4093,20 @@ impl App {
                     style = style.bg(bgc).bold();
                 }
             }
-            self.program.screen_mut().set_str((screen_x, y), &text, bg(style));
+            let style = bg(style);
+            let (range, _) = slice_range(self.program.screen().grapheme_cells(&span.text), skip, remaining);
+            let visible = &span.text[range.clone()];
+            if r.links.is_empty() {
+                self.program.screen_mut().set_str((screen_x, y), visible, style);
+            } else {
+                linked_runs(self.program.screen().grapheme_cells(visible),
+                    byte_offset + range.start, &r.links, &style, &mut self.text_runs);
+                for run in self.text_runs.drain(..) {
+                    self.program.screen_mut().set_str((screen_x, y), &visible[run.range], run.style);
+                    screen_x += run.width;
+                }
+            }
+            byte_offset += span.text.len();
         }
     }
 
@@ -4113,7 +4126,8 @@ impl App {
     /// edge is dropped whole (never split). Returns the slice and its width; at
     /// `skip == 0` it is identical to `clip`.
     fn slice_h(&self, s: &str, skip: u16, width: u16) -> (String, u16) {
-        slice_fit(self.program.screen().grapheme_cells(s), skip, width)
+        let (range, width) = slice_range(self.program.screen().grapheme_cells(s), skip, width);
+        (s[range].to_string(), width)
     }
 
     /// Display width of `s` in terminal columns under the screen's width mode.
@@ -4657,26 +4671,67 @@ fn reveal(hscroll: usize, cs: usize, ce: usize, vw: usize) -> usize {
 
 /// Fit `(cluster, width)` pairs into at most `width` columns after skipping
 /// `skip` leading columns, without splitting a wide cluster. A cluster that
-/// straddles the `skip` boundary is dropped whole. Returns the fitted string
-/// and the columns it occupies. At `skip == 0` this equals [`fit`].
-fn slice_fit<'a>(cells: impl Iterator<Item = (&'a str, u8)>, skip: u16, width: u16) -> (String, u16) {
-    let mut out = String::new();
+/// straddles the `skip` boundary is dropped whole. Returns the source byte
+/// range and the columns it occupies.
+fn slice_range<'a>(cells: impl Iterator<Item = (&'a str, u8)>, skip: u16, width: u16) -> (Range<usize>, u16) {
+    let mut bytes = 0..0;
     let mut col = 0u16;
     let mut w = 0u16;
     for (g, gw) in cells {
         let gw = gw as u16;
         if col < skip {
             col += gw;
+            bytes.start += g.len();
+            bytes.end += g.len();
             continue;
         }
         if w + gw > width {
             break;
         }
-        out.push_str(g);
+        bytes.end += g.len();
         w += gw;
         col += gw;
     }
-    (out, w)
+    (bytes, w)
+}
+
+struct TextRun {
+    range: Range<usize>,
+    width: u16,
+    style: Style,
+}
+
+/// Split at link boundaries without splitting graphemes. The text is already
+/// clipped, and `byte_offset` locates it in the original row. Run ranges refer
+/// to the clipped text so the buffer can be reused without retaining that text.
+fn linked_runs<'a>(
+    cells: impl Iterator<Item = (&'a str, u8)>,
+    byte_offset: usize,
+    links: &[(Range<usize>, Arc<Link>)],
+    base: &Style,
+    runs: &mut Vec<TextRun>,
+) {
+    runs.clear();
+    let mut links = links.iter().peekable();
+    let mut end = 0;
+    for (g, width) in cells {
+        let byte = byte_offset + end;
+        end += g.len();
+        while links.peek().is_some_and(|(range, _)| range.end <= byte) {
+            links.next();
+        }
+        let link = links.peek()
+            .filter(|(range, _)| range.start < byte_offset + end)
+            .map(|(_, link)| link);
+        if let Some(last) = runs.last_mut().filter(|last| last.style.link.as_ref() == link) {
+            last.range.end = end;
+            last.width += width as u16;
+        } else {
+            let mut style = base.clone();
+            style.link = link.cloned();
+            runs.push(TextRun { range: end - g.len()..end, width: width as u16, style });
+        }
+    }
 }
 
 
@@ -4698,7 +4753,7 @@ fn fit_tail(cells: &[(&str, u8)], budget: u16) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_fit, text_cells, abbrev_with_home, Face, Mascot, Sel, Span, Theme, MASCOT_H, MASCOT_W};
+    use super::{expand_tabs, fit, fit_tail, file_of_row, match_cells, reveal, slice_cells, slice_range, text_cells, abbrev_with_home, Face, Mascot, Sel, Span, Theme, MASCOT_H, MASCOT_W};
     use crate::config::Config;
     use regex::RegexBuilder;
     use uncurses::color::Color;
@@ -4712,7 +4767,8 @@ mod tests {
     }
 
     fn slice_h(s: &str, skip: u16, width: u16) -> (String, u16) {
-        slice_fit(grapheme_cells(s, WidthMode::Grapheme, false), skip, width)
+        let (range, width) = slice_range(grapheme_cells(s, WidthMode::Grapheme, false), skip, width);
+        (s[range].to_string(), width)
     }
 
     #[test]
@@ -5024,6 +5080,149 @@ mod tests {
         let style = Theme::from_config(&config).statusbar_position;
         assert_eq!(style.fg, Some(super::Color::Black));
         assert_eq!(style.bg, Some(super::Color::Rgb(255, 215, 0)));
+    }
+
+    #[test]
+    fn row_links_cross_syntax_spans_and_keep_byte_offsets() {
+        use super::{Row, RowKind};
+
+        let row = Row::new(RowKind::Add, None, Some(1), vec![
+            span("界 https"),
+            span("://example.org/"),
+            span("é end"),
+        ]);
+        assert_eq!(row.links.len(), 1);
+        assert_eq!(row.links[0].0, "界 ".len().."界 https://example.org/é".len());
+        assert_eq!(row.links[0].1.url, "https://example.org/%C3%A9");
+    }
+
+    #[test]
+    fn row_link_ranges_can_start_inside_a_grapheme() {
+        use super::{Row, RowKind};
+
+        let url = "https://example.org/界e\u{301}";
+        for prefix in ["\u{0600}", "界 e\u{301} ", "👍🏽 "] {
+            let text = format!("{prefix}{url}");
+            let row = Row::new(RowKind::Context, None, None, vec![span(&text)]);
+            assert_eq!(row.links.len(), 1);
+            assert_eq!(row.links[0].0, prefix.len()..text.len());
+            assert_eq!(row.links[0].1.url, url::Url::parse(url).unwrap().as_str());
+        }
+    }
+
+    #[test]
+    fn clipping_preserves_source_bytes_under_each_width_policy() {
+        for mode in [WidthMode::Grapheme, WidthMode::Wc] {
+            let text = "aaa界 https://example.org/long";
+            let (range, _) = slice_range(grapheme_cells(text, mode, false), 4, 80);
+            assert_eq!(&text[range], " https://example.org/long");
+            let text = "👍🏽 https://example.org/emoji";
+            let skip = grapheme_cells("👍🏽 ", mode, false).map(|(_, w)| w as u16).sum();
+            let (range, _) = slice_range(grapheme_cells(text, mode, false), skip, 80);
+            assert_eq!(&text[range], "https://example.org/emoji");
+        }
+    }
+
+    #[test]
+    fn row_link_ids_are_shared_per_occurrence() {
+        use super::{Row, RowKind};
+
+        let url = "https://example.org";
+        let build = || Row::new(RowKind::Context, None, None, vec![span(&format!("{url} {url}"))]);
+        let row = build();
+        let first = &row.links[0].1;
+        assert!(first.params.starts_with("id=drift-"));
+        let second = &row.links[1].1;
+        assert_eq!(first.url, second.url);
+        assert_ne!(first.params, second.params);
+        let rebuilt = build();
+        assert_ne!(first.params, rebuilt.links[0].1.params);
+    }
+
+    #[test]
+    fn linked_text_is_grouped_into_runs() {
+        use super::{linked_runs, Row, RowKind};
+
+        let text = "before https://example.org/a after https://example.org/a";
+        let row = Row::new(RowKind::Context, None, None, vec![span(text)]);
+        let style = Style::default().fg(Color::Green).bg(Color::Black).bold();
+        let mut runs = Vec::new();
+        linked_runs(grapheme_cells(text, WidthMode::Grapheme, false), 0, &row.links, &style, &mut runs);
+        assert_eq!(runs.iter().map(|r| &text[r.range.clone()]).collect::<Vec<_>>(),
+            ["before ", "https://example.org/a", " after ", "https://example.org/a"]);
+        assert!(runs[0].style.link.is_none());
+        assert!(runs[2].style.link.is_none());
+        assert_ne!(runs[1].style.link.as_ref().unwrap().params, runs[3].style.link.as_ref().unwrap().params);
+        for run in &runs {
+            let mut expected = style.clone();
+            expected.link = run.style.link.clone();
+            assert_eq!(run.style, expected);
+        }
+        assert_eq!(runs.iter().map(|r| r.width as usize).sum::<usize>(), text.len());
+    }
+
+    #[test]
+    fn linked_runs_reuse_storage_without_retaining_links() {
+        use super::{linked_runs, Row, RowKind};
+        use std::sync::Arc;
+
+        let text = "before https://example.org/a after https://example.org/b";
+        let row = Row::new(RowKind::Context, None, None, vec![span(text)]);
+        let style = Style::default().fg(Color::Green).bold();
+        let mut runs = Vec::new();
+        linked_runs(grapheme_cells(text, WidthMode::Grapheme, false), 0, &row.links, &style, &mut runs);
+        let storage = runs.as_ptr();
+        let capacity = runs.capacity();
+        for (_, link) in &row.links {
+            assert_eq!(Arc::strong_count(link), 2);
+        }
+        for run in runs.drain(..) {
+            assert!(!text[run.range].is_empty());
+        }
+        for (_, link) in &row.links {
+            assert_eq!(Arc::strong_count(link), 1);
+        }
+
+        let plain = "plain";
+        let plain_style = Style::default().bg(Color::Black).faint();
+        linked_runs(grapheme_cells(plain, WidthMode::Grapheme, false), 0, &[], &plain_style, &mut runs);
+        assert_eq!(runs.as_ptr(), storage);
+        assert_eq!(runs.capacity(), capacity);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].range, 0..plain.len());
+        assert_eq!(runs[0].width as usize, plain.len());
+        assert_eq!(runs[0].style, plain_style);
+
+        linked_runs(grapheme_cells("", WidthMode::Grapheme, false), 0, &[], &style, &mut runs);
+        assert!(runs.is_empty());
+        assert_eq!(runs.as_ptr(), storage);
+        assert_eq!(runs.capacity(), capacity);
+    }
+
+    #[test]
+    fn linked_runs_preserve_clipping_and_grapheme_boundaries() {
+        use super::{linked_runs, Row, RowKind};
+
+        for mode in [WidthMode::Grapheme, WidthMode::Wc] {
+            for (prefix, skip) in [("\u{0600}", 0), ("👍🏽 ", 0), ("aaa界 ", 4)] {
+                let url = "https://example.org/é";
+                let text = format!("{prefix}{url} end");
+                let row = Row::new(RowKind::Context, None, None, vec![span(&text)]);
+                let (range, width) = slice_range(grapheme_cells(&text, mode, false), skip, 80);
+                let visible = &text[range.clone()];
+                let mut runs = Vec::new();
+                linked_runs(grapheme_cells(visible, mode, false), range.start, &row.links, &Style::default(), &mut runs);
+                assert_eq!(runs.iter().map(|r| &visible[r.range.clone()]).collect::<String>(), visible);
+                assert_eq!(runs.iter().map(|r| r.width).sum::<u16>(), width);
+                let linked: Vec<_> = runs.iter().filter(|r| r.style.link.is_some()).collect();
+                assert_eq!(linked.len(), 1);
+                assert!(visible[linked[0].range.clone()].ends_with(url));
+                if prefix == "\u{0600}" {
+                    assert_eq!(&visible[linked[0].range.clone()], format!("{prefix}{url}"));
+                }
+                assert_eq!(linked[0].style.link.as_ref().unwrap().params, row.links[0].1.params);
+            }
+        }
     }
 
     #[test]
