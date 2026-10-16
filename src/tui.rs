@@ -3291,7 +3291,7 @@ impl App {
 
     /// The single bottom footer: a bold "drift" badge, the current file name,
     /// its stats and flags on a subtle chip, then right-aligned global stats, a
-    /// watch indicator, a position indicator, and a "? help" badge.
+    /// position indicator, optional flags, and a "? help" badge.
     fn render_footer(&mut self, row: u16, at_end: bool) {
         let w = self.program.screen_mut().width();
         let (nf, add, del) = diff::totals(&self.files);
@@ -3308,36 +3308,21 @@ impl App {
         self.program.screen_mut()
             .set_str((0, row), &" ".repeat(w as usize), bar.clone());
 
-        // Right edge: help, position, optional flags, then the global diffstat.
+        // Right edge: help, optional flags, position, then the global diffstat.
         let help_badge = " ? help ";
         let help_x = w.saturating_sub(self.width(help_badge));
         self.help_badge_x = help_x;
         self.program.screen_mut()
             .set_str((help_x, row), help_badge, self.theme.statusbar_help.clone());
 
-        // A reload can cancel prefetch before all file rows arrive.
-        let position_x = if self.loading || self.file_starts.len() < self.files.len() {
-            help_x
-        } else {
-            let position = scroll_position(
-                self.scroll, self.scroll_seg, self.vheight(self.scroll),
-                self.doc_rows.len(), at_end,
-            );
-            let badge = format!(" {position:>3} ");
-            let px = help_x.saturating_sub(self.width(&badge));
-            self.program.screen_mut()
-                .set_str((px, row), &badge, self.theme.statusbar_position.clone());
-            px
-        };
-
         let w_x = if self.watch {
             let w_badge = " F ";
-            let wx = position_x.saturating_sub(self.width(w_badge));
+            let wx = help_x.saturating_sub(self.width(w_badge));
             self.program.screen_mut()
                 .set_str((wx, row), w_badge, self.theme.statusbar_watch.clone());
             wx
         } else {
-            position_x
+            help_x
         };
 
         // "A" badge when the worktree view includes untracked files.
@@ -3351,10 +3336,25 @@ impl App {
             w_x
         };
 
+        // A reload can cancel prefetch before all file rows arrive.
+        let position_x = if self.loading || self.file_starts.len() < self.files.len() {
+            a_x
+        } else {
+            let position = scroll_position(
+                self.scroll, self.scroll_seg, self.vheight(self.scroll),
+                self.doc_rows.len(), at_end,
+            );
+            let badge = format!(" {position:>3} ");
+            let px = a_x.saturating_sub(self.width(&badge));
+            self.program.screen_mut()
+                .set_str((px, row), &badge, self.theme.statusbar_position.clone());
+            px
+        };
+
         // Global stats.
         let stats = format!(" {nf} files +{add} -{del} ");
-        let (stats, _) = self.clip(&stats, a_x);
-        let stats_x = a_x.saturating_sub(self.width(&stats));
+        let (stats, _) = self.clip(&stats, position_x);
+        let stats_x = position_x.saturating_sub(self.width(&stats));
         self.program.screen_mut()
             .set_str((stats_x, row), &stats, self.theme.statusbar_stats.clone());
 
