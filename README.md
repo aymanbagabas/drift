@@ -138,9 +138,13 @@ drift --staged            # what's staged (alias: --cached)
 drift HEAD~3              # a single commit
 drift main..feature       # a range
 drift -- README.md src/   # limit the diff to a file and a directory
+drift -- '*.rs'            # Rust files at any depth
 drift -w                  # watch the repo and refresh on every change
 git diff | drift          # pager mode: read a diff from stdin
 ```
+
+Paths after `--` use Git pathspecs, not regular expressions. Quote glob patterns
+so Git handles them instead of your shell.
 
 > [!TIP]
 > Pair it with an AI agent. Leave `drift -w` open in a split while an agent (Copilot, Claude, etc.) works, every edit lands on screen instantly. Press <kbd>F</kbd> to freeze the view when you want to read, and again to resume.
