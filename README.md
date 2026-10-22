@@ -96,6 +96,12 @@ From the [Nix User Repositories](https://github.com/nix-community/NUR), install
 nix-shell -p '(import (fetchTarball "https://github.com/aymanbagabas/nur/archive/master.tar.gz") {}).drift'
 ```
 
+With nix and enabled flake support:
+
+```sh
+nix profile add github:nix-community/NUR#repos.aymanbagabas.drift
+```
+
 ### Prebuilt binaries
 
 Grab an archive for your platform from the
