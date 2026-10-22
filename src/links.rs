@@ -5,7 +5,8 @@ use regex::Regex;
 use url::Url;
 
 /// Find explicit URLs delimited by whitespace, angle brackets, double quotes,
-/// or backticks. Other punctuation stays part of the candidate.
+/// or backticks. Require `://` except for the listed schemes.
+/// Other punctuation stays part of the candidate.
 pub fn find(text: &str) -> impl Iterator<Item = (Range<usize>, String)> + '_ {
     static CANDIDATE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#"[A-Za-z][A-Za-z0-9+.-]*:[^\s<>"`]*"#).unwrap());
@@ -22,6 +23,14 @@ pub fn find(text: &str) -> impl Iterator<Item = (Range<usize>, String)> + '_ {
             {
                 return None;
             }
+            let (scheme, value) = candidate.as_str().split_once(':')?;
+            if value.is_empty() || value.starts_with(':')
+                || !(value.starts_with("//")
+                    || ["mailto", "magnet", "urn", "tel", "sms", "geo"]
+                        .iter().any(|s| scheme.eq_ignore_ascii_case(s)))
+            {
+                return None;
+            }
             Url::parse(candidate.as_str())
                 .ok()
                 .map(|url| (candidate.range(), String::from(url)))
@@ -33,13 +42,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rejects_code_and_bare_schemes() {
+        for text in [
+            "enable:",
+            "crate::abc::xyz",
+            "std::string",
+            "custom::value",
+            "custom:",
+            "mailto:",
+            "magnet:",
+            "urn:",
+            "tel:",
+            "sms:",
+            "geo:",
+            "custom:value",
+            "C:/file",
+            "http:example.org",
+            "items[start:end]",
+            "name:str",
+            "{enabled:true}",
+            "name:string",
+            "color:red",
+            "a:hover",
+            "name:=value",
+            "object:method()",
+            "module:function()",
+            "${PATH:-default}",
+            "data:text/plain,hello",
+            "javascript:alert(1)",
+            "about:blank",
+            "https://",
+            "https://[invalid]/",
+            "https://example.org:invalid/",
+        ] {
+            assert!(find(text).next().is_none(), "{text}");
+        }
+    }
+
+    #[test]
     fn finds_schemes_and_preserves_display_ranges() {
         let text = "https://example.org/a file:///tmp/a ssh://host/a mailto:a@example.org \
-                    magnet:?xt=urn:btih:abc vscode://file/tmp/a urn:isbn:123";
+                    magnet:?xt=urn:btih:abc vscode://file/tmp/a urn:isbn:123 \
+                    MAILTO:a@example.org MAGNET:?xt=urn:btih:abc URN:isbn:123";
         let links: Vec<_> = find(text).collect();
-        assert_eq!(links.len(), 7);
+        assert_eq!(links.len(), 10);
         for (range, target) in links {
             assert_eq!(Url::parse(&text[range]).unwrap().as_str(), target);
+        }
+    }
+
+    #[test]
+    fn accepts_nonempty_exceptions_case_insensitively() {
+        for candidate in [
+            "mailto:a@example.org",
+            "magnet:?xt=urn:btih:abc",
+            "urn:isbn:123",
+            "tel:+12025550123",
+            "sms:+12025550123",
+            "geo:37.786,-122.399",
+        ] {
+            let (scheme, value) = candidate.split_once(':').unwrap();
+            for text in [candidate.to_string(), format!("{}:{value}", scheme.to_ascii_uppercase())] {
+                assert_eq!(
+                    find(&text).collect::<Vec<_>>(),
+                    vec![(0..text.len(), Url::parse(&text).unwrap().to_string())],
+                    "{text}",
+                );
+            }
+            for text in [format!("{scheme}:"), format!("{scheme}::{value}")] {
+                assert!(find(&text).next().is_none(), "{text}");
+            }
         }
     }
 
@@ -64,10 +136,6 @@ mod tests {
             "https://example.org/?",
             "https://example.org/a)",
             "x://host/path",
-            "custom::value",
-            "custom:",
-            "C:/file",
-            "std::string",
             "https://example.org/\\path",
         ] {
             let expected = Url::parse(candidate).unwrap().to_string();
@@ -77,6 +145,13 @@ mod tests {
                 "{candidate}"
             );
         }
+    }
+
+    #[test]
+    fn finds_urls_between_code_fragments() {
+        let text = "enable: crate::abc::xyz https://example.org std::string mailto:a@example.org";
+        let links: Vec<_> = find(text).map(|(range, _)| &text[range]).collect();
+        assert_eq!(links, ["https://example.org", "mailto:a@example.org"]);
     }
 
     #[test]
