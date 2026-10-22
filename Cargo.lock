@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "drift-diff"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "clap",
  "clap_complete",
