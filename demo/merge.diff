@@ -1,0 +1,12 @@
+diff --cc merge.txt
+index dcd7d7dbcac8,593cf4bbf9c9..2d790365c0d5
+--- a/merge.txt
++++ b/merge.txt
+@@@ -1,4 -1,4 +1,5 @@@
+  start
+- left version
+ -right version
+++merged version
+ +left kept
++ right kept
+  end

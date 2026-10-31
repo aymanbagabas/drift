@@ -29,6 +29,9 @@ pub struct DiffLine {
     pub old_no: Option<usize>,
     /// Line number in the new file (for Context/Add).
     pub new_no: Option<usize>,
+    /// Combined diffs retain one line number and change marker per parent.
+    pub parent_nos: Vec<Option<usize>>,
+    pub parent_marks: String,
     /// Word-level segments; empty means "render `content` unstyled".
     pub segments: Vec<Segment>,
 }
@@ -47,6 +50,10 @@ pub struct FileDiff {
     pub is_binary: bool,
     /// Extra header notes (new file, deleted, rename, mode change).
     pub notes: Vec<String>,
+    pub parent_count: usize,
+    pub parent_paths: Vec<String>,
+    /// Keep Git's combined header rather than inventing a two-sided header.
+    pub combined_header: Option<String>,
 }
 
 impl FileDiff {
@@ -100,14 +107,18 @@ fn strip_prefix(p: &str) -> String {
     p.to_string()
 }
 
-/// Split a raw unified diff into per-file sections, one string per `diff --git`
+pub fn is_file_header(line: &str) -> bool {
+    line.starts_with("diff --git ") || line.starts_with("diff --cc ") || line.starts_with("diff --combined ")
+}
+
+/// Split a raw diff into per-file sections, one string per Git file header
 /// block, in the same order (and count) as [`parse`]. Any preamble before the
 /// first block (e.g. `git show` commit headers) is dropped. Used to copy an
 /// exact per-file patch without reconstructing it.
 pub fn split_files(input: &str) -> Vec<String> {
     let mut sections: Vec<String> = Vec::new();
     for line in input.lines() {
-        if line.starts_with("diff --git") {
+        if is_file_header(line) {
             sections.push(String::new());
         }
         if let Some(cur) = sections.last_mut() {
@@ -118,26 +129,23 @@ pub fn split_files(input: &str) -> Vec<String> {
     sections
 }
 
-/// Extract the commit metadata that precedes the first `diff --git` block, as
+/// Extract the commit metadata that precedes the first Git diff block, as
 /// produced by `git show` (commit line, author/date fields, and the indented
 /// message). Returns the raw lines with a single trailing blank line, so the
 /// metadata is separated from the diff below it. Empty when the input has no
-/// preamble (plain `git diff`, worktree/staged diffs) or no `diff --git` block
-/// at all (e.g. a combined merge diff, `diff --cc`), so non-diff output isn't
-/// mistaken for commit metadata.
+/// preamble (plain `git diff`, worktree/staged diffs). A commit header can
+/// stand alone when Git emits no patch, as with many merge commits.
 pub fn preamble(input: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut found_diff = false;
     for line in input.lines() {
-        if line.starts_with("diff --git") {
+        if is_file_header(line) {
             found_diff = true;
             break;
         }
         lines.push(line.to_string());
     }
-    // Without a `diff --git` boundary there is no diff for these lines to
-    // precede, so don't treat them as a commit-metadata preamble.
-    if !found_diff {
+    if !found_diff && !lines.first().is_some_and(|line| line.starts_with("commit ")) {
         return Vec::new();
     }
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
@@ -150,37 +158,55 @@ pub fn preamble(input: &str) -> Vec<String> {
     lines
 }
 
-/// Parse a unified diff (as produced by `git diff` / `git show`) into files.
+/// Parse unified and combined diffs from `git diff` / `git show`.
 pub fn parse(input: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut lines = input.lines().peekable();
 
     while let Some(line) = lines.next() {
-        if !line.starts_with("diff --git") {
+        if !is_file_header(line) {
             continue;
         }
+        let combined_path = line.strip_prefix("diff --cc ").or_else(|| line.strip_prefix("diff --combined "));
         let mut file = FileDiff {
             old_path: String::new(),
             new_path: String::new(),
             hunks: Vec::new(),
             is_binary: false,
             notes: Vec::new(),
+            parent_count: if combined_path.is_some() { 2 } else { 1 },
+            parent_paths: Vec::new(),
+            combined_header: combined_path.map(|_| line.to_string()),
         };
-        if let Some((a, b)) = parse_diff_header(line) {
+        if let Some(path) = combined_path {
+            file.old_path = path.to_string();
+            file.new_path = path.to_string();
+        } else if let Some((a, b)) = parse_diff_header(line) {
             file.old_path = a;
             file.new_path = b;
         }
 
         // Consume the extended header until the first hunk or next file.
+        let mut saw_old_path = false;
         while let Some(&next) = lines.peek() {
-            if next.starts_with("diff --git") || next.starts_with("@@") {
+            if is_file_header(next) || next.starts_with("@@") {
                 break;
             }
             let h = lines.next().unwrap();
             if let Some(p) = h.strip_prefix("--- ") {
-                file.old_path = strip_prefix(p.trim());
+                if combined_path.is_some() {
+                    file.parent_paths.push(strip_prefix(p.trim()));
+                }
+                if !saw_old_path {
+                    file.old_path = strip_prefix(p.trim());
+                    saw_old_path = true;
+                }
             } else if let Some(p) = h.strip_prefix("+++ ") {
                 file.new_path = strip_prefix(p.trim());
+            } else if file.combined_header.is_some() && h.starts_with("index ") {
+                if let Some((parents, _)) = h[6..].split_once("..") {
+                    file.parent_count = parents.split(',').count();
+                }
             } else if h.starts_with("new file mode") {
                 file.notes.push("new file".into());
             } else if h.starts_with("deleted file mode") {
@@ -189,33 +215,71 @@ pub fn parse(input: &str) -> Vec<FileDiff> {
                 file.notes.push(format!("renamed from {r}"));
             } else if h.starts_with("Binary files") || h.contains("GIT binary patch") {
                 file.is_binary = true;
-            } else if h.starts_with("old mode") || h.starts_with("new mode") {
+            } else if h.starts_with("old mode") || h.starts_with("new mode")
+                || (file.combined_header.is_some() && h.starts_with("mode "))
+            {
                 file.notes.push(h.trim().to_string());
             }
         }
 
         // Parse hunks.
         while let Some(&next) = lines.peek() {
-            if next.starts_with("diff --git") {
+            if is_file_header(next) {
                 break;
             }
             let hline = lines.next().unwrap();
             if !hline.starts_with("@@") {
                 continue;
             }
-            let (mut old_no, mut new_no) = parse_hunk_header(hline);
+            let (mut old_nos, mut new_no) = parse_hunk_header(hline);
+            let combined = file.combined_header.is_some();
+            if combined {
+                file.parent_count = old_nos.len();
+            }
             let mut hunk = Hunk {
                 header: hline.to_string(),
                 lines: Vec::new(),
             };
             while let Some(&next) = lines.peek() {
-                if next.starts_with("@@") || next.starts_with("diff --git") {
+                if next.starts_with("@@") || is_file_header(next) {
                     break;
                 }
                 let l = lines.next().unwrap();
                 if l == "\\ No newline at end of file" {
                     continue;
                 }
+                if combined {
+                    let Some(marks) = l.get(..old_nos.len()) else { continue };
+                    if !marks.bytes().all(|b| matches!(b, b' ' | b'+' | b'-')) {
+                        continue;
+                    }
+                    let removed = marks.contains('-');
+                    let kind = if removed { LineKind::Remove } else if marks.contains('+') { LineKind::Add } else { LineKind::Context };
+                    let parent_nos: Vec<_> = marks.bytes().zip(&mut old_nos).map(|(mark, no)| {
+                        let present = if removed { mark == b'-' } else { mark != b'+' };
+                        present.then(|| {
+                            let number = *no;
+                            *no += 1;
+                            number
+                        })
+                    }).collect();
+                    let result_no = (!removed).then(|| {
+                        let number = new_no;
+                        new_no += 1;
+                        number
+                    });
+                    hunk.lines.push(DiffLine {
+                        kind,
+                        content: l[marks.len()..].to_string(),
+                        old_no: parent_nos.first().copied().flatten(),
+                        new_no: result_no,
+                        parent_nos,
+                        parent_marks: marks.to_string(),
+                        segments: Vec::new(),
+                    });
+                    continue;
+                }
+                let old_no = &mut old_nos[0];
                 let (kind, content) = match l.as_bytes().first() {
                     Some(b'+') => (LineKind::Add, &l[1..]),
                     Some(b'-') => (LineKind::Remove, &l[1..]),
@@ -229,14 +293,14 @@ pub fn parse(input: &str) -> Vec<FileDiff> {
                         (None, n)
                     }
                     LineKind::Remove => {
-                        let o = Some(old_no);
-                        old_no += 1;
+                        let o = Some(*old_no);
+                        *old_no += 1;
                         (o, None)
                     }
                     LineKind::Context => {
-                        let o = Some(old_no);
+                        let o = Some(*old_no);
                         let n = Some(new_no);
-                        old_no += 1;
+                        *old_no += 1;
                         new_no += 1;
                         (o, n)
                     }
@@ -246,10 +310,16 @@ pub fn parse(input: &str) -> Vec<FileDiff> {
                     content: content.to_string(),
                     old_no: o,
                     new_no: n,
+                    parent_nos: Vec::new(),
+                    parent_marks: String::new(),
                     segments: Vec::new(),
                 });
             }
-            intraline(&mut hunk.lines);
+            // Combined removals can come from different parents, so they have
+            // no single old side to pair with additions for a word diff.
+            if !combined {
+                intraline(&mut hunk.lines);
+            }
             file.hunks.push(hunk);
         }
         files.push(file);
@@ -272,18 +342,21 @@ fn parse_diff_header(line: &str) -> Option<(String, String)> {
     Some((strip_prefix(it.next()?), strip_prefix(it.next()?)))
 }
 
-fn parse_hunk_header(line: &str) -> (usize, usize) {
+fn parse_hunk_header(line: &str) -> (Vec<usize>, usize) {
     // @@ -old_start,old_len +new_start,new_len @@ heading
-    let mut old_no = 1;
+    let mut old_nos = Vec::new();
     let mut new_no = 1;
-    for tok in line.split_whitespace() {
+    for tok in line.split_whitespace().skip(1).take_while(|tok| !tok.starts_with("@@")) {
         if let Some(rest) = tok.strip_prefix('-') {
-            old_no = rest.split(',').next().and_then(|s| s.parse().ok()).unwrap_or(1);
+            old_nos.push(rest.split(',').next().and_then(|s| s.parse().ok()).unwrap_or(1));
         } else if let Some(rest) = tok.strip_prefix('+') {
             new_no = rest.split(',').next().and_then(|s| s.parse().ok()).unwrap_or(1);
         }
     }
-    (old_no, new_no)
+    if old_nos.is_empty() {
+        old_nos.push(1);
+    }
+    (old_nos, new_no)
 }
 
 /// Compute word-level segments for balanced remove/add runs within a hunk.
@@ -401,13 +474,108 @@ mod tests {
     }
 
     #[test]
-    fn preamble_is_empty_without_a_diff_git_block() {
-        // A combined merge diff (`diff --cc`) has no `diff --git`; its lines
-        // must not be mistaken for commit metadata.
+    fn preamble_keeps_commit_metadata_without_a_patch() {
+        let show = "commit abc123\nMerge: 111 222\nAuthor: A U Thor\n\n    Clean merge\n\n";
+        assert!(parse(show).is_empty());
+        assert_eq!(preamble(show), ["commit abc123", "Merge: 111 222", "Author: A U Thor", "", "    Clean merge", ""]);
+    }
+
+    #[test]
+    fn preamble_recognizes_combined_diffs() {
         let cc = "commit abc123\nMerge: 111 222\n\n    Merge branch\n\ndiff --cc f\nindex 1,2..3\n--- a/f\n+++ b/f\n@@@ -1,1 -1,1 +1,1 @@@\n- a\n +b\n";
-        assert!(preamble(cc).is_empty());
+        assert_eq!(preamble(cc), ["commit abc123", "Merge: 111 222", "", "    Merge branch", ""]);
         // Arbitrary non-diff text is likewise not a preamble.
         assert!(preamble("just some text\nwith no diff\n").is_empty());
+    }
+
+    const COMBINED: &str = include_str!("../demo/merge.diff");
+
+    #[test]
+    fn parses_combined_parent_columns_and_result_numbers() {
+        let files = parse(COMBINED);
+        assert_eq!(files.len(), 1);
+        let file = &files[0];
+        assert_eq!(file.path(), "merge.txt");
+        assert_eq!(file.parent_count, 2);
+        assert_eq!(file.combined_header.as_deref(), Some("diff --cc merge.txt"));
+        assert_eq!(file.stats(), (3, 2));
+        let lines = &file.hunks[0].lines;
+        let expected = [
+            ("  ", "start", vec![Some(1), Some(1)], Some(1), LineKind::Context),
+            ("- ", "left version", vec![Some(2), None], None, LineKind::Remove),
+            (" -", "right version", vec![None, Some(2)], None, LineKind::Remove),
+            ("++", "merged version", vec![None, None], Some(2), LineKind::Add),
+            (" +", "left kept", vec![Some(3), None], Some(3), LineKind::Add),
+            ("+ ", "right kept", vec![None, Some(3)], Some(4), LineKind::Add),
+            ("  ", "end", vec![Some(4), Some(4)], Some(5), LineKind::Context),
+        ];
+        assert_eq!(lines.len(), expected.len());
+        for (line, (marks, content, parents, result, kind)) in lines.iter().zip(expected) {
+            assert_eq!(line.parent_marks, marks);
+            assert_eq!(line.content, content);
+            assert_eq!(line.old_no, parents[0]);
+            assert_eq!(line.parent_nos, parents);
+            assert_eq!(line.new_no, result);
+            assert_eq!(line.kind, kind);
+            assert!(line.segments.is_empty());
+        }
+    }
+
+    #[test]
+    fn parses_three_parents_and_all_paths() {
+        let patch = "diff --combined renamed.txt\nindex 1,2,3..4\n--- a/first.txt\n--- a/second.txt\n--- a/third.txt\n+++ b/renamed.txt\n@@@@ -10,3 -20,3 -30,3 +40,4 @@@@ heading -not-a-range\n   shared\n-  left\n --others\n+++merged\n ++first kept\n+ +second kept\n  -third removed\n\\ No newline at end of file\n";
+        let files = parse(patch);
+        let file = &files[0];
+        assert_eq!(file.parent_count, 3);
+        assert_eq!(file.old_path, "first.txt");
+        assert_eq!(file.parent_paths, ["first.txt", "second.txt", "third.txt"]);
+        assert_eq!(file.new_path, "renamed.txt");
+        assert_eq!(file.stats(), (3, 3));
+        let lines = &file.hunks[0].lines;
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[0].parent_nos, [Some(10), Some(20), Some(30)]);
+        assert_eq!(lines[2].parent_nos, [None, Some(21), Some(31)]);
+        assert_eq!(lines[4].parent_nos, [Some(12), None, None]);
+        assert_eq!(lines[5].parent_nos, [None, Some(22), None]);
+        assert_eq!(lines[5].new_no, Some(43));
+        assert_eq!(lines[6].parent_nos, [None, None, Some(32)]);
+        assert_eq!(lines[6].new_no, None);
+    }
+
+    #[test]
+    fn combined_hunks_reset_numbers_and_preserve_unicode() {
+        let patch = "diff --cc 文書.txt\n--- a/文書.txt\n+++ b/文書.txt\n@@@ -1 -2 +0,0 @@@\n--旧内容\n@@@ -10,0 -20,0 +30 @@@\n++新内容\n";
+        let files = parse(patch);
+        let file = &files[0];
+        assert_eq!(file.path(), "文書.txt");
+        assert_eq!(file.hunks.len(), 2);
+        assert_eq!(file.hunks[0].lines[0].parent_nos, [Some(1), Some(2)]);
+        assert_eq!(file.hunks[0].lines[0].new_no, None);
+        assert_eq!(file.hunks[0].lines[0].content, "旧内容");
+        assert_eq!(file.hunks[1].lines[0].parent_nos, [None, None]);
+        assert_eq!(file.hunks[1].lines[0].new_no, Some(30));
+        assert_eq!(file.hunks[1].lines[0].content, "新内容");
+    }
+
+    #[test]
+    fn combined_binary_and_mixed_blocks_stay_separate() {
+        let binary = "diff --combined image.png\nindex 1,2,3..4\nBinary files differ\n";
+        let patch = format!("commit abc\nMerge: 1 2\n\n{COMBINED}{SAMPLE}{binary}");
+        let files = parse(&patch);
+        let blocks = split_files(&patch);
+        assert_eq!(files.len(), 3);
+        assert_eq!(blocks, [COMBINED, SAMPLE, binary]);
+        assert_eq!(files[1].parent_count, 1);
+        assert!(files[1].combined_header.is_none());
+        assert_eq!(files[2].parent_count, 3);
+        assert!(files[2].is_binary);
+        for (file, block) in files.iter().zip(&blocks) {
+            let streamed = parse(block);
+            assert_eq!(streamed.len(), 1);
+            assert_eq!(file.path(), streamed[0].path());
+            assert_eq!(file.stats(), streamed[0].stats());
+        }
+        assert_eq!(preamble(&patch), ["commit abc", "Merge: 1 2", ""]);
     }
 
     const SAMPLE: &str = "diff --git a/src/main.rs b/src/main.rs\n\
