@@ -68,7 +68,7 @@ fn git(args: &[&str]) -> std::io::Result<std::process::Output> {
 const PEEK_CAP: usize = 64 * 1024;
 
 /// Peek a piped stream to decide whether it's a unified diff before the TUI
-/// takes over the terminal. Reads lines until a `diff --git` header confirmed
+/// takes over the terminal. Reads lines until a Git file header confirmed
 /// by a following git patch line (ANSI stripped, since git may colorize), EOF,
 /// or `PEEK_CAP` bytes. Returns `(is_diff, consumed)` with the raw bytes read:
 /// on `false`, write them back and stream the rest of stdin — it wasn't a diff
@@ -78,7 +78,7 @@ const PEEK_CAP: usize = 64 * 1024;
 /// stream) passes through instead of aborting.
 pub fn peek_diff<R: std::io::BufRead>(mut r: R) -> std::io::Result<(bool, Vec<u8>)> {
     let mut consumed = Vec::new();
-    let mut pending_header = false; // saw `diff --git`, awaiting a continuation line
+    let mut pending_header = false; // saw a file header, awaiting a continuation line
     loop {
         let start = consumed.len();
         if r.read_until(b'\n', &mut consumed)? == 0 {
@@ -86,7 +86,7 @@ pub fn peek_diff<R: std::io::BufRead>(mut r: R) -> std::io::Result<(bool, Vec<u8
         }
         let head = strip_head(&consumed[start..]);
         if pending_header {
-            // A real `diff --git` is always followed by an `index`/`@@`/mode/
+            // A real file header is followed by an `index`/`@@`/mode/
             // rename/binary line; plain prose that merely starts with those
             // words won't be, so it isn't misrouted into the TUI.
             if is_diff_continuation(&head) {
@@ -94,7 +94,7 @@ pub fn peek_diff<R: std::io::BufRead>(mut r: R) -> std::io::Result<(bool, Vec<u8
             }
             pending_header = false; // false alarm — keep scanning.
         }
-        if head.starts_with("diff --git") {
+        if crate::diff::is_file_header(&head) {
             pending_header = true;
         }
         if consumed.len() >= PEEK_CAP {
@@ -112,7 +112,7 @@ fn strip_head(raw: &[u8]) -> String {
 }
 
 /// Whether `head` (already ANSI-stripped) begins a line git only emits inside a
-/// real `diff --git` block, used to confirm a candidate header.
+/// real Git diff block, used to confirm a candidate header.
 fn is_diff_continuation(head: &str) -> bool {
     const MARKERS: [&str; 11] = [
         "index ", "--- ", "+++ ", "@@", "old mode ", "new mode ", "new file mode ",
@@ -498,6 +498,44 @@ mod tests {
         // The commit header carries ref decorations (child is at HEAD).
         assert!(child_diff.contains("(HEAD"), "child missing ref decoration:\n{child_diff}");
 
+        assert!(run(&["checkout", "-q", &root]).status.success());
+        std::fs::write(dir.join("a.txt"), "three\n").unwrap();
+        assert!(run(&["commit", "-qam", "other parent"]).status.success());
+        let other = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout).unwrap().trim().to_string();
+        std::fs::write(dir.join("a.txt"), "merged\n").unwrap();
+        assert!(run(&["add", "a.txt"]).status.success());
+        let tree = String::from_utf8(run(&["write-tree"]).stdout).unwrap().trim().to_string();
+        let merge = run(&["commit-tree", &tree, "-p", &child, "-p", &other, "-m", "merge resolution"]);
+        assert!(merge.status.success());
+        let merge = String::from_utf8(merge.stdout).unwrap().trim().to_string();
+        let merge_diff = diff_of(&merge);
+        assert!(merge_diff.contains("diff --cc a.txt"), "{merge_diff}");
+        let files = crate::diff::parse(&merge_diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].parent_count, 2);
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(lines.iter().map(|l| l.content.as_str()).collect::<Vec<_>>(), ["two", "three", "merged"]);
+        assert_eq!(lines[2].parent_marks, "++");
+        assert_eq!(lines[2].new_no, Some(1));
+        assert!(crate::diff::preamble(&merge_diff).iter().any(|l| l.starts_with("Merge:")));
+
+        let child_tree = String::from_utf8(run(&["rev-parse", &format!("{child}^{{tree}}")]).stdout).unwrap().trim().to_string();
+        let clean_merge = run(&["commit-tree", &child_tree, "-p", &child, "-p", &other, "-m", "metadata-only merge"]);
+        assert!(clean_merge.status.success());
+        let clean_merge = String::from_utf8(clean_merge.stdout).unwrap().trim().to_string();
+        let metadata = diff_of(&clean_merge);
+        assert!(!metadata.contains("diff --"));
+        assert!(crate::diff::parse(&metadata).is_empty());
+        assert!(crate::diff::preamble(&metadata).iter().any(|l| l.contains("metadata-only merge")));
+        assert!(!peek_diff(metadata.as_bytes()).unwrap().0, "metadata-only pager input still passes through");
+
+        assert!(run(&["-c", "tag.gpgSign=false", "tag", "-a", "merge-tag", &clean_merge, "-m", "annotated merge"]).status.success());
+        let tagged = diff_of("merge-tag");
+        assert!(tagged.starts_with("tag merge-tag\n"));
+        assert!(!tagged.contains("diff --"));
+        assert_eq!(crate::diff::preamble(&tagged).join("\n").trim_end(), tagged.trim_end());
+        assert!(!peek_diff(tagged.as_bytes()).unwrap().0, "metadata-only tag input still passes through");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -548,11 +586,11 @@ mod tests {
         assert!(!is, "prose containing `diff --git` must not open the TUI");
         assert_eq!(pre.as_slice(), &prose[..]);
 
-        // Combined merge diff (`diff --cc`) is passed through: the parser only
-        // splits on `diff --git`, so this is a deliberate decision, not a bug.
-        let cc = b"diff --cc f\n@@@ -1,1 -1,1 +1,1 @@@\n";
-        let (is, _) = peek_diff(&cc[..]).unwrap();
-        assert!(!is);
+        for header in ["diff --cc f", "diff --combined f", "\x1b[1mdiff --cc f\x1b[m"] {
+            let cc = format!("{header}\nindex 1,2..3\n@@@ -1,1 -1,1 +1,1 @@@\n");
+            let (is, _) = peek_diff(cc.as_bytes()).unwrap();
+            assert!(is, "{header}");
+        }
 
         // Colorized `diff --git` (git's pager coloring), confirmed by `index`:
         // detected, and the consumed bytes keep their ANSI codes.
