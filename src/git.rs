@@ -529,6 +529,13 @@ mod tests {
         assert!(crate::diff::preamble(&metadata).iter().any(|l| l.contains("metadata-only merge")));
         assert!(!peek_diff(metadata.as_bytes()).unwrap().0, "metadata-only pager input still passes through");
 
+        assert!(run(&["-c", "tag.gpgSign=false", "tag", "-a", "merge-tag", &clean_merge, "-m", "annotated merge"]).status.success());
+        let tagged = diff_of("merge-tag");
+        assert!(tagged.starts_with("tag merge-tag\n"));
+        assert!(!tagged.contains("diff --"));
+        assert_eq!(crate::diff::preamble(&tagged).join("\n").trim_end(), tagged.trim_end());
+        assert!(!peek_diff(tagged.as_bytes()).unwrap().0, "metadata-only tag input still passes through");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

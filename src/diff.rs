@@ -145,7 +145,7 @@ pub fn preamble(input: &str) -> Vec<String> {
         }
         lines.push(line.to_string());
     }
-    if !found_diff && !lines.first().is_some_and(|line| line.starts_with("commit ")) {
+    if !found_diff && !lines.iter().any(|line| line.starts_with("commit ")) {
         return Vec::new();
     }
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
