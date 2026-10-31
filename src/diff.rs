@@ -542,7 +542,9 @@ mod tests {
         let files = parse(&patch);
         let blocks = split_files(&patch);
         assert_eq!(files.len(), 3);
-        assert_eq!(blocks, [COMBINED, SAMPLE, binary]);
+        assert_eq!(blocks, [COMBINED.replace("\r\n", "\n"), SAMPLE.to_string(), binary.to_string()]);
+        let crlf = patch.replace("\r\n", "\n").replace('\n', "\r\n");
+        assert_eq!(split_files(&crlf), blocks);
         assert_eq!(files[1].parent_count, 1);
         assert!(files[1].combined_header.is_none());
         assert_eq!(files[2].parent_count, 3);
