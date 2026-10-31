@@ -191,6 +191,8 @@ struct Row {
     kind: RowKind,
     old_no: Option<usize>,
     new_no: Option<usize>,
+    parent_nos: Vec<Option<usize>>,
+    parent_marks: String,
     spans: Vec<Span>,
     /// The row's content parsed into display cells once, so selection can read
     /// exact column-to-text mapping (wide chars included) without touching the
@@ -218,6 +220,8 @@ impl Row {
             kind,
             old_no,
             new_no,
+            parent_nos: Vec::new(),
+            parent_marks: String::new(),
             spans,
             content,
             links,
@@ -737,6 +741,8 @@ pub struct App {
     /// computed once instead of re-running `home_dir()` on every render.
     title_dir: Option<String>,
     files: Vec<FileDiff>,
+    /// Maximum parent count in the document; reserves combined-diff gutters.
+    parent_count: u16,
     /// Commit metadata lines (the `git show` header: hash, author, date, and
     /// message) that precede the diff, captured from the source's preamble.
     /// Empty for worktree/staged diffs and plain `git diff` input.
@@ -879,7 +885,7 @@ pub struct App {
 impl App {
     pub fn new(config: Config, source: Source, opts: crate::git::Opts) -> io::Result<Option<Self>> {
         // Peek a piped stream BEFORE touching the terminal: if it never produces
-        // a `diff --git` (e.g. `git diff --stat`, `git show -s`), print it back
+        // a Git diff block (e.g. `git diff --stat`, `git show -s`), print it back
         // verbatim and bail — the screen is never opened, so no altscreen and no
         // raw mode. A real diff hands its already-read prefix to the streamer.
         let stream_prefix = if matches!(source, Source::Stdin) {
@@ -940,6 +946,7 @@ impl App {
             toplevel,
             title_dir,
             files: Vec::new(),
+            parent_count: 1,
             commit_meta: Vec::new(),
             show_meta,
             raw_files: Vec::new(),
@@ -1013,7 +1020,7 @@ impl App {
 
         if matches!(self.source, Source::Stdin) {
             // The pre-screen peek already read the commit header (everything up
-            // to the first `diff --git`), so capture it from the prefix before
+            // to the first file header), so capture it from the prefix before
             // the streamer consumes it. Git colorizes the diff it pipes to a
             // pager, so strip ANSI first: otherwise a colorized `diff --git`
             // line isn't recognized as the diff boundary and its escape codes
@@ -1030,12 +1037,14 @@ impl App {
         match self.source.diff(&self.effective_opts()) {
             Ok(text) => {
                 self.files = diff::parse(&text);
+                self.parent_count = document_parent_count(&self.files);
                 self.raw_files = diff::split_files(&text);
                 self.commit_meta = diff::preamble(&text);
                 self.last_diff = text;
             }
             Err(_) => {
                 self.files.clear();
+                self.parent_count = 1;
                 self.raw_files.clear();
                 self.last_diff.clear();
             }
@@ -1137,7 +1146,7 @@ impl App {
         )
     }
 
-    /// Stream a piped diff from stdin, emitting each file as its `diff --git`
+    /// Stream a piped diff from stdin, emitting each file as its Git diff
     /// block completes instead of blocking on EOF. Each finished block is
     /// parsed and its rows built on this worker, so the main loop just appends.
     fn spawn_stream(&mut self) {
@@ -1157,7 +1166,7 @@ impl App {
             // Parse + build one completed block, then hand it to the main thread.
             let flush = |block: &str, tx: &std::sync::mpsc::Sender<StreamItem>| -> bool {
                 let Some(file) = diff::parse(block).into_iter().next() else {
-                    return true; // no `diff --git` yet (preamble): nothing to emit.
+                    return true; // no file header yet (preamble): nothing to emit.
                 };
                 let rows = build_file_rows(&file, &hl, intraline, tab);
                 tx.send(StreamItem { file, raw: block.to_string(), rows }).is_ok()
@@ -1172,7 +1181,7 @@ impl App {
                 // Git colorizes diffs it pipes to a pager; strip per line so the
                 // parser sees plain text (codes never span lines).
                 let line = uncurses::ansi::strip::strip(&line);
-                if line.starts_with("diff --git") && !block.is_empty() {
+                if diff::is_file_header(&line) && !block.is_empty() {
                     if !flush(&block, &tx) {
                         return; // receiver dropped (quit): stop reading.
                     }
@@ -1197,10 +1206,16 @@ impl App {
         loop {
             match rx.try_recv() {
                 Ok(item) => {
+                    let parent_count = self.parent_count.max(u16::try_from(item.file.parent_count).unwrap_or(u16::MAX));
                     self.file_starts.push(self.doc_rows.len());
                     self.doc_rows.push(file_header_row(&item.file));
                     self.doc_rows.extend(item.rows);
                     self.files.push(item.file);
+                    if parent_count != self.parent_count {
+                        self.parent_count = parent_count;
+                        self.scroll_seg = 0;
+                        self.clear_sel();
+                    }
                     self.raw_files.push(item.raw);
                     got = true;
                 }
@@ -1354,6 +1369,11 @@ impl App {
             Ok(r) => {
                 let anchor = self.capture_anchor();
                 self.files = r.files;
+                let parent_count = document_parent_count(&self.files);
+                if parent_count != self.parent_count {
+                    self.clear_sel();
+                }
+                self.parent_count = parent_count;
                 self.raw_files = r.raw;
                 // Prepend the commit-metadata rows (built on the main thread;
                 // the worker only assembles file rows), shifting file starts.
@@ -1391,7 +1411,7 @@ impl App {
         let target = match self.doc_rows.get(self.cursor).map(|r| r.kind) {
             Some(RowKind::Add) | Some(RowKind::Remove) | Some(RowKind::Context) => {
                 let r = &self.doc_rows[self.cursor];
-                AnchorTarget::Line(r.old_no, r.new_no)
+                AnchorTarget::for_line(r)
             }
             Some(RowKind::Hunk) => AnchorTarget::Hunk(self.hunk_ord_in_file(file, self.cursor)),
             _ => AnchorTarget::Start,
@@ -1700,7 +1720,7 @@ impl App {
         if !matches!(r.kind, RowKind::Add | RowKind::Remove | RowKind::Context) {
             return 1;
         }
-        if self.split {
+        if self.split_active() {
             let body = self.program.screen().width().saturating_sub(self.sidebar_w());
             let left_w = self.split_left_w(body);
             let right_w = body.saturating_sub(left_w + 1);
@@ -1821,7 +1841,7 @@ impl App {
     /// within, and it lets the widest line reveal fully in either pane.
     fn content_view_w(&self) -> u16 {
         let body = self.program.screen().width().saturating_sub(self.sidebar_w());
-        if self.split {
+        if self.split_active() {
             let left = self.split_left_w(body);
             let right = body.saturating_sub(left + 1);
             left.min(right)
@@ -1866,10 +1886,18 @@ impl App {
             0
         } else {
             match gut {
-                Gut::Both => 9,
+                Gut::Both => self.parent_count.saturating_add(1).saturating_mul(5).saturating_sub(1),
                 Gut::Old | Gut::New => 5,
             }
         }
+    }
+
+    fn split_active(&self) -> bool {
+        self.split && self.parent_count == 1
+    }
+
+    fn body_is_empty(&self) -> bool {
+        self.files.is_empty() && self.commit_meta.is_empty() && self.stream.is_none()
     }
 
     /// Whether the file-list sidebar is showing: the user's runtime toggle
@@ -1983,14 +2011,14 @@ impl App {
     }
 
     /// Screen column, within a pane, where a row's content begins: after the
-    /// gutter and the one-column +/- sign (hunk/note rows have no sign).
+    /// gutter and the parent change columns (hunk/note rows have no sign).
     fn content_start(&self, kind: RowKind, gut: Gut) -> u16 {
         let sign = if matches!(kind, RowKind::Add | RowKind::Remove | RowKind::Context) {
-            1
+            self.parent_count
         } else {
             0
         };
-        self.gutter_w(gut) + sign
+        self.gutter_w(gut).saturating_add(sign)
     }
 
     /// Map a pointer at screen (x, y) to a (row, content-column) position.
@@ -2310,7 +2338,7 @@ impl App {
             }
             // Keep the mascot animating smoothly (breathing, drift, poke)
             // whenever it's on screen — idle, or pinned over a diff.
-            if self.files.is_empty() || self.mascot_pinned {
+            if self.body_is_empty() || self.mascot_pinned {
                 timeout = timeout.min(Duration::from_millis(80));
             }
             if self.program.poll_event(Some(timeout))? {
@@ -2563,7 +2591,11 @@ impl App {
                 } else if k.matches_any(["shift+tab", "["]) {
                     self.select_file(-1);
                 } else if k.matches("s") {
-                    self.split = !self.split;
+                    if self.parent_count > 1 {
+                        self.set_flash("Combined diffs show all parents in one view");
+                    } else {
+                        self.split = !self.split;
+                    }
                     if self.wrap {
                         // Split view changes the wrap widths, so the top row's
                         // visual height changes too. Clamp the top segment to
@@ -2704,7 +2736,7 @@ impl App {
                             }
                         }
                     }
-                    if self.files.is_empty() {
+                    if self.body_is_empty() {
                         return Ok(false);
                     }
                     let body_h = footer_row;
@@ -2713,7 +2745,7 @@ impl App {
                     } else if self.sidebar_w() > 0 && m.x == self.divider_x() {
                         // Grab the divider to resize the sidebar.
                         self.resizing = true;
-                    } else if self.split && m.x == self.split_div_x() {
+                    } else if self.split_active() && m.x == self.split_div_x() {
                         // Grab the split divider to resize the two panes.
                         self.resizing_split = true;
                     } else if self.in_sidebar(m.x) {
@@ -2746,7 +2778,7 @@ impl App {
                             // Selection is confined to one pane in split view
                             // (each side has its own reading order); `None` in
                             // the unified view spans the whole width.
-                            let pane = if self.split { self.pane_at(m.x) } else { None };
+                            let pane = if self.split_active() { self.pane_at(m.x) } else { None };
                             let (r, c) = self.point_to_content(m.x, m.y, pane);
                             self.visual = None; // a click starts a fresh mouse selection
                             self.sel = Some(Sel {
@@ -3092,7 +3124,7 @@ impl App {
         let sticky = self.sticky_rows();
         let k = sticky.len() as u16;
         let hs = self.hscroll as u16;
-        let split = self.split;
+        let split = self.split_active();
         let div = self.split_div_x();
         // (y, sx, ex, current) computed while rows are borrowed immutably.
         let mut segs: Vec<(u16, u16, u16, bool)> = Vec::new();
@@ -3235,7 +3267,7 @@ impl App {
         // A piped diff still streaming its first file is loading, not idle:
         // peek already confirmed a `diff --git` is coming, so don't flash the
         // mascot in the gap before the first file paints.
-        let empty = self.files.is_empty() && self.stream.is_none();
+        let empty = self.body_is_empty();
         // A width change (terminal resize, sidebar or split-divider drag, or a
         // mode toggle) reflows the wrapped rows, so the saved top segment may
         // now exceed the row's height in the current layout. Clamp it before
@@ -3251,7 +3283,7 @@ impl App {
         let at_end = if empty {
             // Body is blank; the mascot is painted last, above everything.
             true
-        } else if self.split {
+        } else if self.split_active() {
             self.render_split(bx, bw, body_h)
         } else {
             self.render_diff(bx, bw, body_h)
@@ -3658,7 +3690,7 @@ impl App {
         // Faint centered "clean" note, only on the real empty screen (not when
         // the mascot is pinned over a diff). Drawn first so the mascot floats
         // over it.
-        if self.files.is_empty() {
+        if self.body_is_empty() {
             let hint = "working tree clean";
             let hw = self.width(hint);
             if bw >= hw && body_h >= 1 {
@@ -3741,7 +3773,7 @@ impl App {
     /// gutter mode `gut`: what's left past the line-number gutter and the +/-
     /// sign column.
     fn wrap_width(&self, width: u16, gut: Gut) -> u16 {
-        width.saturating_sub(self.gutter_w(gut) + 1)
+        width.saturating_sub(self.gutter_w(gut).saturating_add(self.parent_count))
     }
 
     /// Visual segments a content row occupies inside a single pane of width
@@ -3963,14 +3995,32 @@ impl App {
             let onum = r.old_no.map(|n| n.to_string()).unwrap_or_default();
             let nnum = r.new_no.map(|n| n.to_string()).unwrap_or_default();
             let gutter = match gut {
+                Gut::Both if self.parent_count > 1 => {
+                    let mut numbers = Vec::new();
+                    for parent in 0..usize::from(self.parent_count) {
+                        let number = if r.parent_nos.is_empty() {
+                            (parent == 0).then_some(r.old_no).flatten()
+                        } else {
+                            r.parent_nos.get(parent).copied().flatten()
+                        };
+                        let number = number.map(|n| n.to_string()).unwrap_or_default();
+                        numbers.push(format!("{number:>4}"));
+                    }
+                    numbers.push(format!("{nnum:>4}"));
+                    numbers.join(" ")
+                }
                 Gut::Both => format!("{onum:>4} {nnum:>4}"),
                 Gut::Old => format!("{onum:>4} "),
                 Gut::New => format!("{nnum:>4} "),
             };
+            let (gutter, _) = self.clip(&gutter, width);
             self.program.screen_mut()
                 .set_str((cx, y), &gutter, bg(self.theme.line_number.clone()));
         }
-        cx += num_w;
+        cx = cx.saturating_add(num_w);
+        if cx >= x + width {
+            return;
+        }
 
         // Sign column + base style per row kind.
         let (sign, base) = match r.kind {
@@ -4017,11 +4067,13 @@ impl App {
             } else {
                 base.clone()
             };
-            self.program.screen_mut().set_str((cx, y), sign, bg(sign_style));
+            let marks = if r.parent_marks.is_empty() { sign } else { &r.parent_marks };
+            let (marks, _) = self.clip(marks, x + width - cx);
+            self.program.screen_mut().set_str((cx, y), &marks, bg(sign_style));
         }
         // Continuation segments leave the sign column blank; the wrap symbol is
         // drawn as the first indented content char below.
-        cx += u16::from(is_content);
+        cx = cx.saturating_add(if is_content { self.parent_count } else { 0 });
 
         let emph_bg = match r.kind {
             RowKind::Add => self.theme.add_emph_bg,
@@ -4464,10 +4516,23 @@ struct Anchor {
 enum AnchorTarget {
     /// A content line, matched by new-side then old-side line number.
     Line(Option<usize>, Option<usize>),
+    /// A combined removal has no result line; retain its parent identity.
+    ParentLine(usize, usize),
     /// The nth (0-based) hunk header within the file.
     Hunk(usize),
     /// The file header (fallback when no line/hunk applies).
     Start,
+}
+
+impl AnchorTarget {
+    fn for_line(row: &Row) -> Self {
+        if row.new_no.is_none() {
+            if let Some((parent, number)) = row.parent_nos.iter().enumerate().find_map(|(i, n)| n.map(|n| (i, n))) {
+                return Self::ParentLine(parent, number);
+            }
+        }
+        Self::Line(row.old_no, row.new_no)
+    }
 }
 
 /// Resolve a captured anchor to a row in a document. Falls back to the file's
@@ -4486,6 +4551,9 @@ fn resolve_anchor_row(files: &[FileDiff], starts: &[usize], doc: &[Row], a: &Anc
             let by_new = new.and_then(|n| range.iter().position(|r| r.new_no == Some(n)));
             let by_old = old.and_then(|o| range.iter().position(|r| r.old_no == Some(o)));
             start + by_new.or(by_old).unwrap_or(0)
+        }
+        AnchorTarget::ParentLine(parent, number) => {
+            start + range.iter().position(|r| r.parent_nos.get(*parent) == Some(&Some(*number))).unwrap_or(0)
         }
         AnchorTarget::Hunk(ord) => range
             .iter()
@@ -4526,7 +4594,7 @@ fn file_header_row(f: &FileDiff) -> Row {
     let real = f.path();
     let a = if f.old_path == "/dev/null" || f.old_path.is_empty() { real } else { &f.old_path };
     let b = if f.new_path == "/dev/null" || f.new_path.is_empty() { real } else { &f.new_path };
-    let text = format!("diff --git a/{a} b/{b}");
+    let text = f.combined_header.clone().unwrap_or_else(|| format!("diff --git a/{a} b/{b}"));
     Row::new(
         RowKind::File,
         None,
@@ -4541,6 +4609,20 @@ fn file_header_row(f: &FileDiff) -> Row {
 
 fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool, tab: usize) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
+    if file.parent_paths.len() > 1 {
+        for (i, path) in file.parent_paths.iter().enumerate() {
+            rows.push(Row::new(RowKind::Note, None, None, vec![Span {
+                fg: None,
+                changed: false,
+                text: format!("parent {}: {path}", i + 1),
+            }]));
+        }
+        rows.push(Row::new(RowKind::Note, None, None, vec![Span {
+            fg: None,
+            changed: false,
+            text: format!("result: {}", file.new_path),
+        }]));
+    }
     if file.is_binary {
         rows.push(Row::new(
             RowKind::Note,
@@ -4576,10 +4658,17 @@ fn build_file_rows(file: &FileDiff, hl: &Highlighter, intraline: bool, tab: usiz
                 LineKind::Remove => RowKind::Remove,
                 LineKind::Context => RowKind::Context,
             };
-            rows.push(Row::new(kind, line.old_no, line.new_no, spans));
+            let mut row = Row::new(kind, line.old_no, line.new_no, spans);
+            row.parent_nos = line.parent_nos.clone();
+            row.parent_marks = line.parent_marks.clone();
+            rows.push(row);
         }
     }
     rows
+}
+
+fn document_parent_count(files: &[FileDiff]) -> u16 {
+    u16::try_from(files.iter().map(|f| f.parent_count).max().unwrap_or(1)).unwrap_or(u16::MAX)
 }
 
 /// Combine syntect color spans with intra-line changed segments into a single
@@ -4917,6 +5006,9 @@ mod tests {
             hunks: vec![],
             is_binary: false,
             notes: vec![],
+            parent_count: 1,
+            parent_paths: vec![],
+            combined_header: None,
         };
         let text = |f: &FileDiff| super::file_header_row(f).spans.iter().map(|s| s.text.clone()).collect::<String>();
         // New file: old side is /dev/null, but the header must show the real name.
@@ -4925,6 +5017,62 @@ mod tests {
         assert_eq!(text(&fd("old.txt", "/dev/null")), "diff --git a/old.txt b/old.txt");
         // Rename keeps both distinct paths.
         assert_eq!(text(&fd("from.txt", "to.txt")), "diff --git a/from.txt b/to.txt");
+    }
+
+    #[test]
+    fn combined_rows_preserve_parent_columns_without_polluting_content() {
+        let files = crate::diff::parse(include_str!("../demo/merge.diff"));
+        let hl = crate::highlight::Highlighter::new("onedark", true);
+        let (rows, starts) = super::assemble_document(&files, &hl, true, 4);
+        assert_eq!(super::document_parent_count(&files), 2);
+        assert_eq!(starts, [0]);
+        assert_eq!(rows[0].spans[0].text, "diff --cc merge.txt");
+        assert_eq!(rows[1].spans[0].text, "@@@ -1,4 -1,4 +1,5 @@@");
+        for (row, line) in rows[2..].iter().zip(&files[0].hunks[0].lines) {
+            assert_eq!(row.parent_nos, line.parent_nos);
+            assert_eq!(row.parent_marks, line.parent_marks);
+            assert_eq!(row.new_no, line.new_no);
+            let content = row.spans.iter().map(|s| s.text.as_str()).collect::<String>();
+            assert_eq!(content, line.content);
+        }
+    }
+
+    #[test]
+    fn combined_all_paths_are_visible_in_parent_order() {
+        let patch = "diff --cc result.txt\nindex 1,2..3\n--- a/left.txt\n--- a/right.txt\n+++ b/result.txt\n@@@ -1 -1 +1 @@@\n--before\n++after\n";
+        let files = crate::diff::parse(patch);
+        let hl = crate::highlight::Highlighter::new("onedark", true);
+        let rows = super::build_file_rows(&files[0], &hl, true, 4);
+        let text: Vec<_> = rows[..3].iter().map(|r| r.spans[0].text.as_str()).collect();
+        assert_eq!(text, ["parent 1: left.txt", "parent 2: right.txt", "result: result.txt"]);
+        assert!(rows[..3].iter().all(|r| r.kind == super::RowKind::Note));
+        assert!(rows[3].kind == super::RowKind::Hunk);
+        assert_eq!(rows[4].parent_nos, [Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn combined_removal_anchors_keep_their_parent_after_rebuild() {
+        use super::{Anchor, AnchorTarget, Row, RowKind, assemble_document, resolve_anchor_row};
+        let files = crate::diff::parse(include_str!("../demo/merge.diff"));
+        let hl = crate::highlight::Highlighter::new("onedark", true);
+        let (rows, _) = assemble_document(&files, &hl, true, 4);
+        let (mut rebuilt, mut starts) = assemble_document(&files, &hl, true, 4);
+        rebuilt.insert(0, Row::new(RowKind::Meta, None, None, vec![span("metadata")]));
+        starts[0] += 1;
+        for (index, row) in rows.iter().enumerate().filter(|(_, row)| row.kind == RowKind::Remove) {
+            let anchor = Anchor {
+                path: files[0].path().to_string(),
+                target: AnchorTarget::for_line(row),
+                screen_off: 0,
+            };
+            assert_eq!(resolve_anchor_row(&files, &starts, &rebuilt, &anchor), index + 1);
+        }
+        let missing = Anchor {
+            path: files[0].path().to_string(),
+            target: AnchorTarget::ParentLine(1, 999),
+            screen_off: 0,
+        };
+        assert_eq!(resolve_anchor_row(&files, &starts, &rebuilt, &missing), starts[0]);
     }
 
     #[cfg(unix)]
@@ -5348,6 +5496,9 @@ mod tests {
                 hunks: vec![],
                 is_binary: false,
                 notes: vec![],
+                parent_count: 1,
+                parent_paths: vec![],
+                combined_header: None,
             }
         }
         fn row(kind: RowKind, old: Option<usize>, new: Option<usize>) -> Row {
