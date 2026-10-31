@@ -1214,7 +1214,7 @@ impl App {
                     if parent_count != self.parent_count {
                         self.parent_count = parent_count;
                         self.scroll_seg = 0;
-                        self.sel = None;
+                        self.clear_sel();
                     }
                     self.raw_files.push(item.raw);
                     got = true;
@@ -1369,7 +1369,11 @@ impl App {
             Ok(r) => {
                 let anchor = self.capture_anchor();
                 self.files = r.files;
-                self.parent_count = document_parent_count(&self.files);
+                let parent_count = document_parent_count(&self.files);
+                if parent_count != self.parent_count {
+                    self.clear_sel();
+                }
+                self.parent_count = parent_count;
                 self.raw_files = r.raw;
                 // Prepend the commit-metadata rows (built on the main thread;
                 // the worker only assembles file rows), shifting file starts.
