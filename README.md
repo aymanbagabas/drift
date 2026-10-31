@@ -146,11 +146,6 @@ git diff | drift          # pager mode: read a diff from stdin
 Paths after `--` use [Git pathspecs](https://git-scm.com/docs/gitglossary#def_pathspec),
 not regular expressions. Quote glob patterns so Git handles them instead of your shell.
 
-Merge commits retain Git's combined diff format, with one change column per parent.
-Combined diffs use one view instead of two split panes. Try `drift < demo/merge.diff`
-from this checkout.
-If Git emits only commit metadata, standalone drift shows it without inventing a diff.
-
 > [!TIP]
 > Pair it with an AI agent. Leave `drift -w` open in a split while an agent (Copilot, Claude, etc.) works, every edit lands on screen instantly. Press <kbd>F</kbd> to freeze the view when you want to read, and again to resume.
 

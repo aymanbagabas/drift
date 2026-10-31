@@ -248,70 +248,48 @@ pub fn parse(input: &str) -> Vec<FileDiff> {
                 if l == "\\ No newline at end of file" {
                     continue;
                 }
-                if combined {
+                let (marks, content) = if combined {
                     let Some(marks) = l.get(..old_nos.len()) else { continue };
                     if !marks.bytes().all(|b| matches!(b, b' ' | b'+' | b'-')) {
                         continue;
                     }
-                    let removed = marks.contains('-');
-                    let kind = if removed { LineKind::Remove } else if marks.contains('+') { LineKind::Add } else { LineKind::Context };
-                    let parent_nos: Vec<_> = marks.bytes().zip(&mut old_nos).map(|(mark, no)| {
-                        let present = if removed { mark == b'-' } else { mark != b'+' };
-                        present.then(|| {
-                            let number = *no;
-                            *no += 1;
-                            number
-                        })
-                    }).collect();
-                    let result_no = (!removed).then(|| {
-                        let number = new_no;
-                        new_no += 1;
+                    (marks, &l[marks.len()..])
+                } else {
+                    match l.as_bytes().first() {
+                        Some(b'+' | b'-' | b' ') => (&l[..1], &l[1..]),
+                        _ => (" ", l),
+                    }
+                };
+                let removed = marks.contains('-');
+                let kind = if removed { LineKind::Remove } else if marks.contains('+') { LineKind::Add } else { LineKind::Context };
+                let mut old_no = None;
+                let mut parent_nos = Vec::new();
+                for (i, (mark, no)) in marks.bytes().zip(&mut old_nos).enumerate() {
+                    let present = if removed { mark == b'-' } else { mark != b'+' };
+                    let number = present.then(|| {
+                        let number = *no;
+                        *no += 1;
                         number
                     });
-                    hunk.lines.push(DiffLine {
-                        kind,
-                        content: l[marks.len()..].to_string(),
-                        old_no: parent_nos.first().copied().flatten(),
-                        new_no: result_no,
-                        parent_nos,
-                        parent_marks: marks.to_string(),
-                        segments: Vec::new(),
-                    });
-                    continue;
+                    if i == 0 {
+                        old_no = number;
+                    }
+                    if combined {
+                        parent_nos.push(number);
+                    }
                 }
-                let old_no = &mut old_nos[0];
-                let (kind, content) = match l.as_bytes().first() {
-                    Some(b'+') => (LineKind::Add, &l[1..]),
-                    Some(b'-') => (LineKind::Remove, &l[1..]),
-                    Some(b' ') => (LineKind::Context, &l[1..]),
-                    _ => (LineKind::Context, l),
-                };
-                let (o, n) = match kind {
-                    LineKind::Add => {
-                        let n = Some(new_no);
-                        new_no += 1;
-                        (None, n)
-                    }
-                    LineKind::Remove => {
-                        let o = Some(*old_no);
-                        *old_no += 1;
-                        (o, None)
-                    }
-                    LineKind::Context => {
-                        let o = Some(*old_no);
-                        let n = Some(new_no);
-                        *old_no += 1;
-                        new_no += 1;
-                        (o, n)
-                    }
-                };
+                let result_no = (!removed).then(|| {
+                    let number = new_no;
+                    new_no += 1;
+                    number
+                });
                 hunk.lines.push(DiffLine {
                     kind,
                     content: content.to_string(),
-                    old_no: o,
-                    new_no: n,
-                    parent_nos: Vec::new(),
-                    parent_marks: String::new(),
+                    old_no,
+                    new_no: result_no,
+                    parent_nos,
+                    parent_marks: if combined { marks.to_string() } else { String::new() },
                     segments: Vec::new(),
                 });
             }
